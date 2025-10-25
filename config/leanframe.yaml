@@ -7,7 +7,7 @@ screen:
 
 # Playback
 playback:
-  default_image_seconds: 12
+  default_image_seconds: 3
   shuffle: true
   loop: true
   resume_on_start: true
