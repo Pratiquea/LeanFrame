@@ -46,11 +46,25 @@ class Viewer:
             subprocess.run(["ffplay", "-autoexit", "-fs", "-hide_banner", "-loglevel", "error", path])
 
     def loop(self):
+        font = pygame.font.SysFont(None, 36)
         while True:
-            row = self.lib.get_by_id(self.current_id)
+            row = self.lib.get_by_id(self.current_id) if self.current_id else None
             if not row:
+                # draw message
+                self.screen.fill((0,0,0))
+                msg = font.render("No media found in data/library", True, (200,200,200))
+                rect = msg.get_rect(center=(self.W//2, self.H//2))
+                self.screen.blit(msg, rect)
+                pygame.display.flip()
+                # try rescanning occasionally
+                self.lib.scan_once(recursive=self.cfg.indexer.recursive, ignore_hidden=self.cfg.indexer.ignore_hidden)
+                time.sleep(2)
+                rows = self.lib.list_ids()
+                self.current_id = rows[0][0] if rows else None
+                continue
                 time.sleep(1); continue
             mid, path, kind = row
+            print(f"[viewer] showing id={mid} kind={kind} path={path}")
             path = Path(path)
             if path.suffix.lower() in SUPPORTED_IMAGES:
                 self._show_image(str(path))
