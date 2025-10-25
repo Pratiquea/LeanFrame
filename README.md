@@ -4,7 +4,7 @@
 ```bash
 sudo apt-get update
 sudo apt-get install -y git python3-venv ffmpeg mpv
-git clone <this-repo> && cd leanframe
+git clone <this-repo> && cd LeanFrame
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
 cp config/leanframe.yaml.example config/leanframe.yaml  # edit as needed
