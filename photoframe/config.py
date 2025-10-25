@@ -60,18 +60,40 @@ class AppCfg:
 
     @staticmethod
     def load(path: Path) -> "AppCfg":
+        """Load YAML and map nested fields safely (no surprises if extra keys exist)."""
         data = yaml.safe_load(Path(path).read_text())
+
+        # --- screen ---
+        screen = ScreenCfg(**data["screen"])
+
+        # --- playback (extract nested transitions) ---
+        pb = dict(data.get("playback", {}))
+        transitions = pb.pop("transitions", {}) or {}
+        playback = PlaybackCfg(
+            **pb,
+            transitions_crossfade=bool(transitions.get("crossfade", True)),
+            crossfade_ms=int(transitions.get("crossfade_ms", 350)),
+        )
+
+        # --- paths ---
         p = data["paths"]
+        paths = PathsCfg(
+            library=Path(p["library"]).expanduser(),
+            import_dir=Path(p["import"]).expanduser(),
+            state=Path(p["state"]).expanduser(),
+            db=Path(p["db"]).expanduser(),
+        )
+
+        # --- server, conversion, indexer ---
+        server = ServerCfg(**data["server"])
+        conversion = ConvertCfg(**data["conversion"])
+        indexer = IndexerCfg(**data["indexer"])
+
         return AppCfg(
-            screen=ScreenCfg(**data["screen"]),
-            playback=PlaybackCfg(**data["playback"],
-                                 transitions_crossfade=data["playback"]["transitions"]["crossfade"],
-                                 crossfade_ms=data["playback"]["transitions"]["crossfade_ms"]),
-            paths=PathsCfg(library=Path(p["library"]).expanduser(),
-                           import_dir=Path(p["import"]).expanduser(),
-                           state=Path(p["state"]).expanduser(),
-                           db=Path(p["db"]).expanduser()),
-            server=ServerCfg(**data["server"]),
-            conversion=ConvertCfg(**data["conversion"]),
-            indexer=IndexerCfg(**data["indexer"]),
+            screen=screen,
+            playback=playback,
+            paths=paths,
+            server=server,
+            conversion=conversion,
+            indexer=indexer,
         )
