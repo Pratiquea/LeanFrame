@@ -1,0 +1,16 @@
+[Unit]
+Description=LeanFrame digital photo frame
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/leanframe
+ExecStart=/opt/leanframe/.venv/bin/python -m photoframe
+Restart=always
+RestartSec=3
+User=leanframe
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

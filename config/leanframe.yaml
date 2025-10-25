@@ -1,0 +1,79 @@
+# Panel & display
+screen:
+width: 1920
+height: 1080
+fullscreen: true
+cursor_hidden: true
+
+
+# Playback
+playback:
+default_image_seconds: 12
+shuffle: true
+loop: true
+resume_on_start: true
+transitions:
+crossfade: true
+crossfade_ms: 350
+
+
+# Library paths
+paths:
+library: data/library
+import: data/import
+state: data/state.json
+db: data/library.db
+
+
+# Server (uploads)
+server:
+host: 0.0.0.0
+port: 8765
+auth_token: "change-me"
+max_upload_mb: 512
+allow_extensions: [jpg, jpeg, png, webp, mp4, mov, mkv]
+
+
+# Conversion fallback (rare)
+conversion:
+enabled: true
+ffmpeg_bin: ffmpeg
+imagemagick_convert_bin: convert
+target_image_format: jpg
+target_video_format: mp4
+video_codec: libx264
+crf: 23
+
+
+# Indexer
+indexer:
+watch: false # scanner is manual; sync triggers scans
+recursive: true
+ignore_hidden: true
+
+
+# Cloud sync
+sync:
+enabled: true
+mode: rclone # rclone | photos_api | off
+interval_minutes: 10 # used by systemd timer
+# Rclone configuration: set up your remotes with `rclone config`
+rclone:
+bin: rclone
+jobs:
+- name: google_drive_album
+remote: gdrive:PhotosFrame/ # rclone remote:folder
+include_ext: [jpg, jpeg, png, webp, mp4, mov, mkv]
+dest_subdir: drive # will become data/library/drive
+one_way: true # pull only
+- name: google_photos
+remote: gphotos:media/by-year/ # requires rclone gphotos remote
+include_ext: [jpg, jpeg, png, webp, mp4, mov, mkv]
+dest_subdir: gphotos
+one_way: true
+# Native Google Photos API (advanced users only)
+photos_api:
+client_secret_path: config/google_photos_oauth.json
+token_path: config/google_photos_token.json
+album_names: ["Living Room Frame"]
+dest_subdir: gphotos_api
