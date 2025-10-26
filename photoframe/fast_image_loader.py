@@ -50,17 +50,45 @@ class FastImageLoader:
         return surf.convert()  # match display format for fast blits
 
     def _decode_with_turbojpeg(self, path):
-        # Choose denominator (1,2,4,8) to approach target size on decode
-        # Start with 1, pick larger denom if image is much bigger than screen
-        header = _jpeg.decode_header(open(path, 'rb').read(2048))
-        print("width = {}, type = {}".format(header['width'], type(header['width'])))
-        w, h = header['width'], header['height']
+        """
+        Robust JPEG fast path:
+          - Works with PyTurboJPEG header as dict *or* tuple (older builds on Pi).
+          - Reads the whole file (partial header reads can fail on some JPEGs).
+          - If reshape dims are off (MCU rounding), falls back gracefully.
+        """
+        with open(path, "rb") as f:
+            data = f.read()
+        # PyTurboJPEG header can be dict or tuple depending on version.
+        hdr = _jpeg.decode_header(data)
+        if isinstance(hdr, dict):
+            w, h = int(hdr.get("width")), int(hdr.get("height"))
+        else:
+            # Older API: (width, height, subsamp, colorspace)
+            w, h = int(hdr[0]), int(hdr[1])
+        # Choose denominator (1,2,4,8) to approach target size on decode.
         denom = 1
-        while denom < 8 and (w // (denom * 2) > self.W*1.25 or h // (denom * 2) > self.H*1.25):
+        while denom < 8 and (w // (denom * 2) > self.W * 1.25 or h // (denom * 2) > self.H * 1.25):
             denom *= 2
-        with open(path, 'rb') as f:
-            rgb = _jpeg.decode(f.read(), pixel_format=TJPF_RGB, scaling_factor=(1, denom))
-        arr = np.frombuffer(rgb, dtype=np.uint8).reshape(h//denom, w//denom, 3)
+        try:
+            rgb = _jpeg.decode(data, pixel_format=TJPF_RGB, scaling_factor=(1, denom))
+        except Exception:
+            # If turbojpeg decode fails for any reason, defer to Pillow path.
+            return self._decode_with_pillow(Path(path))
+        # Some builds return a numpy array already; others return bytes.
+        if isinstance(rgb, np.ndarray):
+            arr = rgb
+        else:
+            out_w = max(1, w // denom)
+            out_h = max(1, h // denom)
+            arr = np.frombuffer(rgb, dtype=np.uint8)
+            # Guard against MCU rounding mismatches; try the expected shape first.
+            try:
+                arr = arr.reshape(out_h, out_w, 3)
+            except ValueError:
+                # Final fallback: ask Pillow to infer shape from bytes.
+                from PIL import Image
+                im = Image.frombuffer("RGB", (out_w, out_h), rgb, "raw", "RGB", 0, 1)
+                arr = np.asarray(im)
         return arr
 
     def _decode_with_pyvips(self, path):
