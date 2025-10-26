@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
-sudo cp systemd/leanframe-sync.* /etc/systemd/system/
+
 sudo systemctl daemon-reload
-sudo systemctl enable leanframe-sync.timer
-sudo systemctl start leanframe-sync.timer
+sudo systemctl enable --now leanframe-sync.timer
+sudo systemctl start        leanframe-sync.service || true
+
+echo "leanframe-sync.timer enabled and started."

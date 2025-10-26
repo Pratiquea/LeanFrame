@@ -16,6 +16,19 @@ mkdir -p data/library/images data/library/videos
 ```
 copy JPG/PNG/WEBP to images/, MP4/MOV/MKV to videos/
 
+### 3) rclone one-time setup
+Install rclone
+```
+sudo apt update
+sudo apt install -y rclone
+```
+Configure google drive remote
+```
+rclone config
+```
+https://rclone.org/remote_setup/ :very imp
+
+
 ### 3) Run
 ```
 python -m photoframe
