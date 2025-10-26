@@ -22,7 +22,7 @@ def main():
 
     watch_flag = None
     if cfg.indexer.watch:
-        _, watch_flag = start_watcher(lib, cfg.paths.library, recursive=cfg.indexer.recursive)
+        _, watch_flag = start_watcher(cfg.paths.library, recursive=cfg.indexer.recursive)
 
     # Optional: run one sync before starting viewer
     syncer = Syncer(cfg, lib)
