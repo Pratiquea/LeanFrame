@@ -1,0 +1,26 @@
+# Flutter & Dart build output
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.dart_tool/
+.gradle/
+.idea/
+local.properties
+android/app/build/
+ios/Flutter/Flutter.framework
+ios/Flutter/Generated.xcconfig
+ios/Runner/GeneratedPluginRegistrant.*
+
+# Platform intermediates
+macos/Flutter/ephemeral/
+linux/flutter/ephemeral/
+windows/flutter/ephemeral/
+
+# VSCode / IntelliJ project files
+.vscode/
+*.iml
+*.ipr
+*.iws
+.DS_Store
+Thumbs.db
