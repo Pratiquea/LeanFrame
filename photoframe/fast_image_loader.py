@@ -127,7 +127,13 @@ class FastImageLoader:
 
     def load_surface(self, path):
         p = Path(path)
-        key = (p, self.W, self.H, p.stat().st_mtime)
+        # key = (p, self.W, self.H, p.stat().st_mtime)
+        try:
+            mtime = p.stat().st_mtime
+        except FileNotFoundError:
+            # Surface was requested but file is missing
+            raise FileNotFoundError(f"Missing media: {p}")
+        key = (p, self.W, self.H, mtime)
         def mk():
             # try EXIF-thumb-first showing (optional): you can split API to return “thumb, future”
             if _jpeg and p.suffix.lower() in (".jpg", ".jpeg"):

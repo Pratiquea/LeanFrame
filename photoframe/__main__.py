@@ -30,6 +30,8 @@ def main():
     t.start()
 
     # Start viewer loop (blocking)
+    # purge viewer cache
+    lib.purge_missing()
     viewer = Viewer(cfg, lib)
     viewer.loop()
 

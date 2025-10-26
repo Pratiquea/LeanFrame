@@ -69,20 +69,23 @@ class Viewer:
             mid, path, kind = row
             print(f"[viewer] showing id={mid} kind={kind} path={path}")
             path = Path(path)
-            if path.suffix.lower() in SUPPORTED_IMAGES:
-                self._show_image(str(path))
-                # prime cache for neighbors to make next/prev flips feel instant
-                try:
-                    self._preload_neighbors(mid)
-                except Exception as e:
-                    pass
-                self._save_resume_id(mid)
-            else:
-                # let external player own the screen
-                pygame.display.iconify()
-                self._play_video(str(path))
-                pygame.display.set_mode((self.W, self.H), FULLSCREEN if self.cfg.screen.fullscreen else 0)
-                self._save_resume_id(mid)
+            try:
+                if path.suffix.lower() in SUPPORTED_IMAGES:
+                    self._show_image(str(path))
+                    self._save_resume_id(mid)
+                else:
+                    # let external player own the screen
+                    pygame.display.iconify()
+                    self._play_video(str(path))
+                    pygame.display.set_mode((self.W, self.H), FULLSCREEN if self.cfg.screen.fullscreen else 0)
+                    self._save_resume_id(mid)
+            except FileNotFoundError:
+                print(f"[viewer] missing; removing from DB and skipping: {path}")
+                # remove stale row and continue
+                self.lib.delete_id(mid)
+                # try the next id immediately
+                self.current_id = self.lib.next_id(mid, loop=self.cfg.playback.loop)
+                continue
             # next
             self.current_id = self.lib.next_id(mid, loop=self.cfg.playback.loop)
 

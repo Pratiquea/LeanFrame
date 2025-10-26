@@ -2,6 +2,7 @@ from pathlib import Path
 import sqlite3, time
 from .constants import DB_SCHEMA, SUPPORTED_IMAGES, SUPPORTED_VIDEOS
 from .utils import ext, is_hidden
+import os
 
 class Library:
     def __init__(self, db_path: Path, library_root: Path):
@@ -38,6 +39,21 @@ class Library:
             except Exception as e:
                 print("index error", p, e)
         self.conn.commit()
+
+    def delete_id(self, mid: int):
+        self.conn.execute("DELETE FROM media WHERE id=?", (mid,))
+        self.conn.commit()
+
+    def purge_missing(self):
+        cur = self.conn.execute("SELECT id, path FROM media")
+        to_delete = []
+        for mid, path in cur.fetchall():
+            if not os.path.exists(path):
+                to_delete.append(mid)
+        if to_delete:
+            self.conn.executemany("DELETE FROM media WHERE id=?", [(m,) for m in to_delete])
+            self.conn.commit()
+            print(f"[indexer] purged {len(to_delete)} missing files")
 
     def list_ids(self, kind=None):
         cur = self.conn.cursor()
