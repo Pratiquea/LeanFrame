@@ -24,7 +24,7 @@ class UploaderPage extends StatefulWidget {
 }
 
 class _UploaderPageState extends State<UploaderPage> {
-  final hostCtrl = TextEditingController(text: 'http://leanframe.local:8765');
+  final hostCtrl = TextEditingController(text: 'http://192.168.1.104:8765');
   final tokenCtrl = TextEditingController(text: 'change-me');
   String status = '';
 
