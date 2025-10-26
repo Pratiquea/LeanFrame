@@ -4,8 +4,19 @@ from .constants import DB_SCHEMA, SUPPORTED_IMAGES, SUPPORTED_VIDEOS
 from .utils import ext, is_hidden
 import os
 from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
-import threading
+from watchdog.events import FileSystemEventHandler, FileSystemEvent
+import threading, fnmatch
+
+# Extensions we actually care about (same spirit as SUPPORTED_IMAGES/VIDEOS)
+WATCH_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".heic", ".heif",
+              ".dng", ".tif", ".tiff", ".avif", ".mp4", ".mov", ".mkv", ".m4v", ".webm"}
+
+# Ignore junk/temp patterns that cause noisy events
+IGNORE_GLOBS = [
+    ".*",           # hidden files
+    "*.part",       # our uploader temp
+    "*.tmp", "*.swp", "*~",
+]
 
 class Library:
     def __init__(self, db_path: Path, library_root: Path):
@@ -79,50 +90,80 @@ class Library:
             row = self.conn.execute("SELECT id FROM media ORDER BY id LIMIT 1").fetchone()
             return row[0] if row else None
         return None
-    
-
-# class _DebounceHandler(FileSystemEventHandler):
-#     def __init__(self, lib: "Library", recursive=True, ignore_hidden=True):
-#         self.lib = lib
-#         self.recursive = recursive
-#         self.ignore_hidden = ignore_hidden
-#         self._lock = threading.Lock()
-#         self._pending = False
-
-#     def on_any_event(self, event):
-#         with self._lock:
-#             if not self._pending:
-#                 self._pending = True
-#                 threading.Timer(1.0, self._do_scan).start()  # 1s debounce
-
-#     def _do_scan(self):
-#         try:
-#             print(f"[watchdog] Running scan at {time.strftime('%H:%M:%S')} ...")
-#             count_before = len(self.lib.list_ids())
-#             self.lib.scan_once(recursive=self.recursive, ignore_hidden=self.ignore_hidden)
-#             count_after = len(self.lib.list_ids())
-#             print(f"[watchdog] scan_once complete. Media count: {count_before} → {count_after}")
-#         except Exception as e:
-#             print(f"[watchdog] scan_once error: {e}")
-#         finally:
-#             with self._lock:
-#                 self._pending = False
 
 class _SignalHandler(FileSystemEventHandler):
-    def __init__(self, flag: "threading.Event"):
+    """
+    Watchdog handler that:
+      - ignores directories and temp files
+      - only reacts to created/moved/deleted
+      - coalesces bursts (debounce)
+      - never touches SQLite (just signals via Event)
+    """
+    def __init__(self, flag: "threading.Event", debounce_s: float = 1.0):
         self.flag = flag
+        self.debounce_s = debounce_s
+        self._lock = threading.Lock()
+        self._scheduled = False
+        self._last_burst_log = 0.0
 
-    def on_any_event(self, event):
-        # Just signal; no DB work here
-        print(f"[watchdog] change detected: {event.event_type} {event.src_path}")
-        self.flag.set()
+    def on_any_event(self, event: FileSystemEvent):
+        # Ignore directory events
+        if event.is_directory:
+            return
 
-def start_watcher(lib: "Library", path: Path, recursive=True):
+        p = event.src_path
+        name = os.path.basename(p)
+
+        # Ignore temp/junk patterns
+        for pat in IGNORE_GLOBS:
+            if fnmatch.fnmatch(name, pat):
+                return
+
+        # Only act on meaningful change types
+        if event.event_type not in ("created", "moved", "deleted"):
+            # (optional) if you really want modified, uncomment next line
+            # if event.event_type == "modified": pass
+            return
+
+        # Check extension
+        ext = os.path.splitext(name)[1].lower()
+        if ext not in WATCH_EXTS:
+            return
+
+        # Coalesce bursts: schedule a single flag set per burst
+        with self._lock:
+            now = time.time()
+            # One log line per burst (every debounce window)
+            if now - self._last_burst_log >= self.debounce_s:
+                print(f"[watchdog] change detected: {event.event_type} {p}")
+                self._last_burst_log = now
+
+            if not self._scheduled:
+                self._scheduled = True
+                # Arm a one-shot timer that sets the flag after debounce window
+                t = threading.Timer(self.debounce_s, self._arm_flag)
+                t.daemon = True
+                t.start()
+
+    def _arm_flag(self):
+        try:
+            self.flag.set()   # viewer thread will do scan_once()
+        finally:
+            with self._lock:
+                self._scheduled = False
+
+
+def start_watcher(path: Path, recursive: bool = True):
+    """
+    Start a background observer and return (observer, event_flag).
+    The caller should poll `event_flag.is_set()` from the main/viewer thread,
+    run lib.scan_once(), then `event_flag.clear()`.
+    """
     flag = threading.Event()
-    handler = _SignalHandler(flag)
+    handler = _SignalHandler(flag, debounce_s=1.0)
     obs = Observer()
     obs.schedule(handler, str(path), recursive=recursive)
     obs.daemon = True
     obs.start()
-    print(f"[watchdog] Watching {path} (recursive={recursive})")
+    print(f"[watchdog] watching {path} (recursive={recursive})")
     return obs, flag
