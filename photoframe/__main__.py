@@ -18,6 +18,7 @@ def main():
     server_module.cfg = cfg
 
     lib = Library(cfg.paths.db, cfg.paths.library)
+    lib.scan_once(recursive=True, ignore_hidden=True)
 
     # Optional: run one sync before starting viewer
     syncer = Syncer(cfg, lib)
