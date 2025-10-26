@@ -10,12 +10,17 @@ RCLONE_REMOTE="gdrive"
 DRIVE_PATH=""                   # or a folder ID in quotes
 
 # ====== Sanity checks ======
+# ====== Sanity checks ======
 if [ ! -d "${REPO_DIR}" ]; then
-  echo "Repo not found at ${REPO_DIR}"; exit 1
+  echo "ERROR: Repo not found at ${REPO_DIR}"; exit 1
 fi
 if [ ! -x "${VENV_BIN}/python" ]; then
-  echo "Existing venv not found at ${VENV_BIN}. Expected ${VENV_BIN}/python"
-  echo "Create it first (python3 -m venv .venv && pip install -r requirements.txt)."
+  echo "ERROR: Existing venv python not found at ${VENV_BIN}/python"
+  echo "Create it first:  python3 -m venv ${REPO_DIR}/.venv && source ${REPO_DIR}/.venv/bin/activate && pip install -r ${REPO_DIR}/requirements.txt"
+  exit 1
+fi
+if ! command -v rclone >/dev/null 2>&1; then
+  echo "ERROR: rclone not found. Install it:  sudo apt-get update && sudo apt-get install -y rclone"
   exit 1
 fi
 
@@ -42,7 +47,7 @@ User=${USER_NAME}
 WorkingDirectory=${REPO_DIR}
 EnvironmentFile=/etc/leanframe.env
 Environment=PYTHONUNBUFFERED=1
-# Uncomment one if you need SDL/FB/GUI:
+# Uncomment one if you actually need SDL/GUI:
 # Environment=SDL_VIDEODRIVER=fbcon
 # Environment=DISPLAY=:0
 
@@ -54,6 +59,7 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
 
+# Replace the bad unit with a correct one
 sudo tee /etc/systemd/system/leanframe-sync.service >/dev/null <<'EOF'
 [Unit]
 Description=LeanFrame: rclone sync Drive -> local photo cache
@@ -62,28 +68,17 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-User=%i
+User=rpi
 EnvironmentFile=/etc/leanframe.env
 ExecStartPre=/usr/bin/mkdir -p "${PHOTO_DIR}"
 ExecStart=/usr/bin/rclone sync "${RCLONE_REMOTE}:${DRIVE_PATH}" "${PHOTO_DIR}" \
   --fast-list --transfers 4 --checkers 8 --create-empty-src-dirs=false
 EOF
+# Patch placeholder with actual user safely
+sudo sed -i "s|rpi|${USER_NAME}|g" /etc/systemd/system/leanframe-sync.service
 
-sudo tee /etc/systemd/system/leanframe-sync@.service >/dev/null <<'EOF'
-[Unit]
-Description=LeanFrame: rclone sync Drive -> local photo cache (templated)
-Wants=network-online.target
-After=network-online.target
 
-[Service]
-Type=oneshot
-User=%i
-EnvironmentFile=/etc/leanframe.env
-ExecStartPre=/usr/bin/mkdir -p "${PHOTO_DIR}"
-ExecStart=/usr/bin/rclone sync "${RCLONE_REMOTE}:${DRIVE_PATH}" "${PHOTO_DIR}" \
-  --fast-list --transfers 4 --checkers 8 --create-empty-src-dirs=false
-EOF
-
+# Timer
 sudo tee /etc/systemd/system/leanframe-sync.timer >/dev/null <<EOF
 [Unit]
 Description=Run LeanFrame sync periodically (10 mins)
@@ -97,15 +92,27 @@ Unit=leanframe-sync.service
 WantedBy=timers.target
 EOF
 
-# ====== Enable & start ======
+# ====== Reload, enable, start ======
 sudo systemctl daemon-reload
-# Use the non-templated service bound to your current user:
 sudo systemctl enable --now leanframe-sync.timer
-sudo systemctl start        leanframe-sync.service || true   # warm sync
+# Warm sync (non-fatal if it fails; check logs with journalctl -u leanframe-sync)
+sudo systemctl start leanframe-sync.service || true
+
 sudo systemctl enable --now leanframe.service
 
-echo "Done.
-- leanframe.service (app) using ${VENV_BIN}/python in ${REPO_DIR}
-- leanframe-sync.timer every 10 min -> ${PHOTO_DIR}
-Edit /etc/leanframe.env to change PHOTO_DIR or rclone settings.
-"
+echo "-------------------------------------------------------------"
+echo "Installed units:"
+echo "  /etc/systemd/system/leanframe.service"
+echo "  /etc/systemd/system/leanframe-sync.service"
+echo "  /etc/systemd/system/leanframe-sync.timer"
+echo
+echo "Env file: /etc/leanframe.env"
+echo "  PHOTO_DIR=${PHOTO_DIR}"
+echo "  RCLONE_REMOTE=${RCLONE_REMOTE}"
+echo "  DRIVE_PATH=\"${DRIVE_PATH}\""
+echo
+echo "Status:"
+echo "  systemctl status leanframe"
+echo "  systemctl status leanframe-sync.timer"
+echo "  journalctl -u leanframe-sync -n 100 --no-pager"
+echo "-------------------------------------------------------------"
