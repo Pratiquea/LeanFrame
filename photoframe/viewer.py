@@ -6,7 +6,7 @@ from pygame.locals import FULLSCREEN
 from .indexer import Library
 from .config import AppCfg
 from .constants import SUPPORTED_IMAGES, SUPPORTED_VIDEOS
-from fast_image_loader import FastImageLoader
+from .fast_image_loader import FastImageLoader
 
 
 class Viewer:

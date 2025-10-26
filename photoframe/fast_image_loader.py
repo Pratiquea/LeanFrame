@@ -53,6 +53,7 @@ class FastImageLoader:
         # Choose denominator (1,2,4,8) to approach target size on decode
         # Start with 1, pick larger denom if image is much bigger than screen
         header = _jpeg.decode_header(open(path, 'rb').read(2048))
+        print("width = {}, type = {}".format(header['width'], type(header['width'])))
         w, h = header['width'], header['height']
         denom = 1
         while denom < 8 and (w // (denom * 2) > self.W*1.25 or h // (denom * 2) > self.H*1.25):
