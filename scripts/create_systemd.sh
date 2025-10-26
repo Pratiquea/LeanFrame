@@ -38,26 +38,32 @@ EOF
 sudo tee /etc/systemd/system/leanframe.service >/dev/null <<EOF
 [Unit]
 Description=LeanFrame digital photo frame
-After=network-online.target
-Wants=network-online.target
+After=graphical.target network-online.target
+Wants=graphical.target network-online.target
 
 [Service]
 Type=simple
-User=${USER_NAME}
-WorkingDirectory=${REPO_DIR}
+User=rpi
+WorkingDirectory=/home/rpi/gits/LeanFrame
 EnvironmentFile=/etc/leanframe.env
 Environment=PYTHONUNBUFFERED=1
-# Uncomment one if you actually need SDL/GUI:
-# Environment=SDL_VIDEODRIVER=fbcon
-# Environment=DISPLAY=:0
 
-ExecStart=${VENV_BIN}/python -m photoframe
+# Tell SDL/pygame to use Wayland and the user's desktop session
+Environment=SDL_VIDEODRIVER=wayland
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+
+# Slight delay helps if the compositor/socket races at boot
+ExecStartPre=/bin/sleep 3
+
+ExecStart=/home/rpi/gits/LeanFrame/.venv/bin/python -m photoframe
 Restart=always
-RestartSec=3
+RestartSec=2
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical.target
 EOF
+
 
 # Replace the bad unit with a correct one
 sudo tee /etc/systemd/system/leanframe-sync.service >/dev/null <<'EOF'
