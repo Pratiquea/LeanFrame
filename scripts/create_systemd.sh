@@ -1,124 +1,103 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ====== USER CONFIG (edit if your paths differ) ======
-USER_NAME="${USER}"                      # e.g. rpi
-REPO_DIR="${HOME}/gits/LeanFrame"        # your existing repo
-VENV_BIN="${REPO_DIR}/.venv/bin"
-PHOTO_DIR="${HOME}/DrivePhotos"          # local photo cache (for sync)
-RCLONE_REMOTE="gdrive"
-DRIVE_PATH=""                   # or a folder ID in quotes
+# ===== User-configurable paths =====
+USER_NAME="${USER}"                                # e.g. rpi
+HOME_DIR="${HOME}"
+REPO_DIR="${HOME_DIR}/gits/LeanFrame"              # your repo
+VENV_BIN="${REPO_DIR}/.venv/bin"                   # existing venv bin
+PHOTO_DIR="${HOME_DIR}/DrivePhotos"                # local photo cache (for sync)
+RCLONE_REMOTE="gdrive"                             # rclone remote name
+DRIVE_PATH=""                             # Drive folder name OR ID (keep quotes for ID)
 
-# ====== Sanity checks ======
-# ====== Sanity checks ======
+# ===== Sanity checks =====
 if [ ! -d "${REPO_DIR}" ]; then
   echo "ERROR: Repo not found at ${REPO_DIR}"; exit 1
 fi
 if [ ! -x "${VENV_BIN}/python" ]; then
-  echo "ERROR: Existing venv python not found at ${VENV_BIN}/python"
+  echo "ERROR: venv python not found at ${VENV_BIN}/python"
   echo "Create it first:  python3 -m venv ${REPO_DIR}/.venv && source ${REPO_DIR}/.venv/bin/activate && pip install -r ${REPO_DIR}/requirements.txt"
   exit 1
 fi
-if ! command -v rclone >/dev/null 2>&1; then
-  echo "ERROR: rclone not found. Install it:  sudo apt-get update && sudo apt-get install -y rclone"
-  exit 1
-fi
 
-# ====== Ensure photo dir exists ======
+# ===== Ensure photo dir and global env exist =====
 mkdir -p "${PHOTO_DIR}"
-
-# ====== Global env for systemd units ======
 sudo tee /etc/leanframe.env >/dev/null <<EOF
 PHOTO_DIR=${PHOTO_DIR}
 RCLONE_REMOTE=${RCLONE_REMOTE}
 DRIVE_PATH="${DRIVE_PATH}"
 EOF
 
-# ====== Render systemd units from templates ======
-sudo tee /etc/systemd/system/leanframe.service >/dev/null <<EOF
+# ===== Create user units (~/.config/systemd/user) =====
+USER_UNIT_DIR="${HOME_DIR}/.config/systemd/user"
+mkdir -p "${USER_UNIT_DIR}"
+
+# leanframe.service (Wayland user service with socket wait)
+cat > "${USER_UNIT_DIR}/leanframe.service" <<'EOF'
 [Unit]
-Description=LeanFrame digital photo frame
-After=graphical.target network-online.target
-Wants=graphical.target network-online.target
+Description=LeanFrame (Wayland user service; waits for compositor)
+Wants=graphical-session.target
+After=graphical-session.target
 
 [Service]
 Type=simple
-User=rpi
 WorkingDirectory=/home/rpi/gits/LeanFrame
 EnvironmentFile=/etc/leanframe.env
 Environment=PYTHONUNBUFFERED=1
-
-# Tell SDL/pygame to use Wayland and the user's desktop session
 Environment=SDL_VIDEODRIVER=wayland
-Environment=WAYLAND_DISPLAY=wayland-0
-Environment=XDG_RUNTIME_DIR=/run/user/1000
-
-# Slight delay helps if the compositor/socket races at boot
-ExecStartPre=/bin/sleep 3
-
+# Wait up to ~15s for Wayland socket to avoid race at login
+ExecStartPre=/bin/sh -lc 'for i in $(seq 1 15); do [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && exit 0; sleep 1; done; echo "wayland-0 not ready"; exit 1'
 ExecStart=/home/rpi/gits/LeanFrame/.venv/bin/python -m photoframe
 Restart=always
 RestartSec=2
 
 [Install]
-WantedBy=graphical.target
+WantedBy=default.target
 EOF
+# Patch username in the unit paths
+sed -i "s|/home/rpi|${HOME_DIR}|g" "${USER_UNIT_DIR}/leanframe.service"
 
-
-# Replace the bad unit with a correct one
-sudo tee /etc/systemd/system/leanframe-sync.service >/dev/null <<'EOF'
+# Path unit to start LeanFrame when Wayland socket appears
+cat > "${USER_UNIT_DIR}/leanframe-wayland.path" <<'EOF'
 [Unit]
-Description=LeanFrame: rclone sync Drive -> local photo cache
-Wants=network-online.target
-After=network-online.target
+Description=Start LeanFrame when Wayland socket appears
 
-[Service]
-Type=oneshot
-User=rpi
-EnvironmentFile=/etc/leanframe.env
-ExecStartPre=/usr/bin/mkdir -p "${PHOTO_DIR}"
-ExecStart=/usr/bin/rclone sync "${RCLONE_REMOTE}:${DRIVE_PATH}" "${PHOTO_DIR}" \
-  --fast-list --transfers 4 --checkers 8 --create-empty-src-dirs=false
-EOF
-# Patch placeholder with actual user safely
-sudo sed -i "s|rpi|${USER_NAME}|g" /etc/systemd/system/leanframe-sync.service
-
-
-# Timer
-sudo tee /etc/systemd/system/leanframe-sync.timer >/dev/null <<EOF
-[Unit]
-Description=Run LeanFrame sync periodically (10 mins)
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=10min
-Unit=leanframe-sync.service
+[Path]
+PathExists=%t/wayland-0
+Unit=leanframe.service
 
 [Install]
-WantedBy=timers.target
+WantedBy=default.target
 EOF
 
-# ====== Reload, enable, start ======
-sudo systemctl daemon-reload
-sudo systemctl enable --now leanframe-sync.timer
-# Warm sync (non-fatal if it fails; check logs with journalctl -u leanframe-sync)
-sudo systemctl start leanframe-sync.service || true
+# ===== Make the user manager survive boot (do once) =====
+sudo loginctl enable-linger "${USER_NAME}"
 
-sudo systemctl enable --now leanframe.service
+# ===== Disable and remove any old system service (optional cleanup) =====
+if systemctl list-unit-files | grep -q '^leanframe.service'; then
+  sudo systemctl disable --now leanframe.service || true
+  sudo rm -f /etc/systemd/system/leanframe.service || true
+  sudo systemctl daemon-reload || true
+fi
+
+# ===== Enable & start user units =====
+systemctl --user daemon-reload
+systemctl --user enable --now leanframe.service
+systemctl --user enable --now leanframe-wayland.path
 
 echo "-------------------------------------------------------------"
-echo "Installed units:"
-echo "  /etc/systemd/system/leanframe.service"
-echo "  /etc/systemd/system/leanframe-sync.service"
-echo "  /etc/systemd/system/leanframe-sync.timer"
+echo "Installed user units:"
+echo "  ${USER_UNIT_DIR}/leanframe.service"
+echo "  ${USER_UNIT_DIR}/leanframe-wayland.path"
 echo
-echo "Env file: /etc/leanframe.env"
+echo "Global env: /etc/leanframe.env"
 echo "  PHOTO_DIR=${PHOTO_DIR}"
 echo "  RCLONE_REMOTE=${RCLONE_REMOTE}"
 echo "  DRIVE_PATH=\"${DRIVE_PATH}\""
 echo
-echo "Status:"
-echo "  systemctl status leanframe"
-echo "  systemctl status leanframe-sync.timer"
-echo "  journalctl -u leanframe-sync -n 100 --no-pager"
+echo "User-service logs (no sudo):"
+echo "  journalctl --user -u leanframe -f"
+echo
+echo "If you use the system sync timer, manage it separately:"
+echo "  sudo systemctl status leanframe-sync.timer"
 echo "-------------------------------------------------------------"
