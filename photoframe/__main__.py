@@ -2,7 +2,7 @@ from pathlib import Path
 import threading
 import uvicorn
 from .config import AppCfg
-from .indexer import Library
+from .indexer import Library, start_watcher
 from .server import app as fastapi_app
 from .viewer import Viewer
 from .sync import Syncer
@@ -18,7 +18,10 @@ def main():
     server_module.cfg = cfg
 
     lib = Library(cfg.paths.db, cfg.paths.library)
-    lib.scan_once(recursive=True, ignore_hidden=True)
+    # lib.scan_once(recursive=True, ignore_hidden=True)
+    if cfg.indexer.watch:
+        start_watcher(lib, cfg.paths.library, recursive=cfg.indexer.recursive,
+                    ignore_hidden=cfg.indexer.ignore_hidden)
 
     # Optional: run one sync before starting viewer
     syncer = Syncer(cfg, lib)
