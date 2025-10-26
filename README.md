@@ -3,7 +3,7 @@
 ### 1) Install
 ```bash
 sudo apt-get update
-sudo apt-get install -y git python3-venv ffmpeg mpv
+sudo apt-get install -y git python3-venv ffmpeg mpv libvips
 git clone <this-repo> && cd LeanFrame
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt

@@ -2,10 +2,12 @@ import os, json, time, subprocess, random
 from pathlib import Path
 import pygame
 from pygame.locals import FULLSCREEN
-from .utils import load_image_cover
+# from .utils import load_image_cover
 from .indexer import Library
 from .config import AppCfg
 from .constants import SUPPORTED_IMAGES, SUPPORTED_VIDEOS
+from fast_image_loader import FastImageLoader
+
 
 class Viewer:
     def __init__(self, cfg: AppCfg, lib: Library):
@@ -16,6 +18,7 @@ class Viewer:
         flags = FULLSCREEN if cfg.screen.fullscreen else 0
         pygame.init()
         self.screen = pygame.display.set_mode((self.W, self.H), flags)
+        self.loader = FastImageLoader(self.screen.get_size())
         pygame.mouse.set_visible(not cfg.screen.cursor_hidden)
         self.clock = pygame.time.Clock()
         self.crossfade_ms = cfg.playback.crossfade_ms if cfg.playback.transitions_crossfade else 0
@@ -68,6 +71,11 @@ class Viewer:
             path = Path(path)
             if path.suffix.lower() in SUPPORTED_IMAGES:
                 self._show_image(str(path))
+                # prime cache for neighbors to make next/prev flips feel instant
+                try:
+                    self._preload_neighbors(mid)
+                except Exception as e:
+                    pass
                 self._save_resume_id(mid)
             else:
                 # let external player own the screen
@@ -79,17 +87,25 @@ class Viewer:
             self.current_id = self.lib.next_id(mid, loop=self.cfg.playback.loop)
 
     def _show_image(self, path: str):
-        target = (self.W, self.H)
-        img = load_image_cover(path, target)
-        frame = pygame.image.frombuffer(img.tobytes(), img.size, img.mode)
+        """
+        Render using FastImageLoader:
+          - Decodes directly to screen size (low CPU/RAM)
+          - Applies EXIF orientation
+          - Uses libjpeg-turbo DCT scaling for JPEGs if available
+          - Centers image (letterboxed if aspect differs)
+        """
+        frame = self.loader.load_surface(path)
+        # center the image; it may be smaller than screen if aspect ratio differs
+        dst_rect = frame.get_rect(center=(self.W//2, self.H//2))
         if self.crossfade_ms > 0:
-            self._crossfade(frame)
+            self._crossfade(frame, dst_rect)
         else:
-            self.screen.blit(frame, (0,0))
+            self.screen.fill((0,0,0))
+            self.screen.blit(frame, dst_rect.topleft)
             pygame.display.flip()
             self._sleep_with_events(self.cfg.playback.default_image_seconds)
 
-    def _crossfade(self, new_surface: pygame.Surface):
+    def _crossfade(self, new_surface: pygame.Surface, dst_rect: pygame.Rect):
         start = pygame.time.get_ticks()
         snapshot = self.screen.copy()
         while True:
@@ -98,17 +114,64 @@ class Viewer:
                     pygame.quit(); raise SystemExit
             t = pygame.time.get_ticks() - start
             alpha = min(255, int(255 * t / self.crossfade_ms))
+            # draw previous frame snapshot as background
             self.screen.blit(snapshot, (0,0))
+            # crossfade the centered image
             new_surface.set_alpha(alpha)
-            self.screen.blit(new_surface, (0,0))
+            self.screen.blit(new_surface, dst_rect.topleft)
             pygame.display.flip()
             self.clock.tick(60)
             if t >= self.crossfade_ms:
                 # hold
-                self.screen.blit(new_surface, (0,0))
+                self.screen.fill((0,0,0))
+                self.screen.blit(new_surface, dst_rect.topleft)
                 pygame.display.flip()
                 self._sleep_with_events(self.cfg.playback.default_image_seconds)
                 break
+
+    def _preload_neighbors(self, current_id: int):
+        """
+        Builds a tiny [prev, curr, next] list of image paths around current_id
+        and asks the loader to warm prev/next in background.
+        """
+        rows = self.lib.list_ids() #[(id, path, kind), ...] or [(id.), ...]
+        # Normalize to a list of (id, path, kind)
+        norm = []
+        for r in rows:
+            if len(r) == 3:
+                norm.append(r)
+            else:
+                mid = r[0]
+                row = self.lib.get_by_id(mid)
+                if row:
+                    norm.append(row)
+        if not norm:
+            return
+
+        ids = [r[0] for r in norm]
+        try:
+            i = ids.index(current_id)
+        except ValueError:
+            return
+        
+        n = len(norm)
+        prev_i = (i-1) % n
+        next_i = (i+1) % n
+
+        # Only keep image paths (skip video preloading)
+        def img_path(t):
+            _id, _p, _k = t
+            return str(_p) if Path(_p).suffix.lower() in SUPPORTED_IMAGES else None
+        
+        prev_p = img_path(norm[prev_i])
+        curr_p = img_path(norm[i])
+        next_p = img_path(norm[next_i])
+        paths = [p for p in [prev_p, curr_p, next_p] if p]
+        if paths and len(paths) >= 2:
+            # idx=position of current within the paths list
+            idx = paths.index(curr_p) if curr_p in paths else 0
+            self.loader.preload_neighbors(paths, idx)
+
 
     def _sleep_with_events(self, seconds: float):
         end = time.time() + seconds

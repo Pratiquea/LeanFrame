@@ -102,6 +102,7 @@ class AppCfg:
             state=Path(p["state"]).expanduser(),
             db=Path(p["db"]).expanduser(),
         )
+        print(f"[config] library path: {paths.library}")
 
         server = ServerCfg(**data["server"])
         conversion = ConvertCfg(**data["conversion"])
