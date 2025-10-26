@@ -18,10 +18,11 @@ def main():
     server_module.cfg = cfg
 
     lib = Library(cfg.paths.db, cfg.paths.library)
-    # lib.scan_once(recursive=True, ignore_hidden=True)
+    lib.scan_once(recursive=cfg.indexer.recursive, ignore_hidden=cfg.indexer.ignore_hidden)
+
+    watch_flag = None
     if cfg.indexer.watch:
-        start_watcher(lib, cfg.paths.library, recursive=cfg.indexer.recursive,
-                    ignore_hidden=cfg.indexer.ignore_hidden)
+        _, watch_flag = start_watcher(lib, cfg.paths.library, recursive=cfg.indexer.recursive)
 
     # Optional: run one sync before starting viewer
     syncer = Syncer(cfg, lib)
@@ -36,7 +37,7 @@ def main():
     # Start viewer loop (blocking)
     # purge viewer cache
     lib.purge_missing()
-    viewer = Viewer(cfg, lib)
+    viewer = Viewer(cfg, lib, watch_flag=watch_flag)
     viewer.loop()
 
 if __name__ == "__main__":

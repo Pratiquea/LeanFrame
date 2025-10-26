@@ -81,38 +81,48 @@ class Library:
         return None
     
 
-class _DebounceHandler(FileSystemEventHandler):
-    def __init__(self, lib: "Library", recursive=True, ignore_hidden=True):
-        self.lib = lib
-        self.recursive = recursive
-        self.ignore_hidden = ignore_hidden
-        self._lock = threading.Lock()
-        self._pending = False
+# class _DebounceHandler(FileSystemEventHandler):
+#     def __init__(self, lib: "Library", recursive=True, ignore_hidden=True):
+#         self.lib = lib
+#         self.recursive = recursive
+#         self.ignore_hidden = ignore_hidden
+#         self._lock = threading.Lock()
+#         self._pending = False
+
+#     def on_any_event(self, event):
+#         with self._lock:
+#             if not self._pending:
+#                 self._pending = True
+#                 threading.Timer(1.0, self._do_scan).start()  # 1s debounce
+
+#     def _do_scan(self):
+#         try:
+#             print(f"[watchdog] Running scan at {time.strftime('%H:%M:%S')} ...")
+#             count_before = len(self.lib.list_ids())
+#             self.lib.scan_once(recursive=self.recursive, ignore_hidden=self.ignore_hidden)
+#             count_after = len(self.lib.list_ids())
+#             print(f"[watchdog] scan_once complete. Media count: {count_before} → {count_after}")
+#         except Exception as e:
+#             print(f"[watchdog] scan_once error: {e}")
+#         finally:
+#             with self._lock:
+#                 self._pending = False
+
+class _SignalHandler(FileSystemEventHandler):
+    def __init__(self, flag: "threading.Event"):
+        self.flag = flag
 
     def on_any_event(self, event):
-        with self._lock:
-            if not self._pending:
-                self._pending = True
-                threading.Timer(1.0, self._do_scan).start()  # 1s debounce
+        # Just signal; no DB work here
+        print(f"[watchdog] change detected: {event.event_type} {event.src_path}")
+        self.flag.set()
 
-    def _do_scan(self):
-        try:
-            print(f"[watchdog] Running scan at {time.strftime('%H:%M:%S')} ...")
-            count_before = len(self.lib.list_ids())
-            self.lib.scan_once(recursive=self.recursive, ignore_hidden=self.ignore_hidden)
-            count_after = len(self.lib.list_ids())
-            print(f"[watchdog] scan_once complete. Media count: {count_before} → {count_after}")
-        except Exception as e:
-            print(f"[watchdog] scan_once error: {e}")
-        finally:
-            with self._lock:
-                self._pending = False
-
-def start_watcher(lib: "Library", path: Path, recursive=True, ignore_hidden=True):
-    handler = _DebounceHandler(lib, recursive, ignore_hidden)
+def start_watcher(lib: "Library", path: Path, recursive=True):
+    flag = threading.Event()
+    handler = _SignalHandler(flag)
     obs = Observer()
     obs.schedule(handler, str(path), recursive=recursive)
     obs.daemon = True
     obs.start()
     print(f"[watchdog] Watching {path} (recursive={recursive})")
-    return obs
+    return obs, flag

@@ -10,9 +10,10 @@ from .fast_image_loader import FastImageLoader
 
 
 class Viewer:
-    def __init__(self, cfg: AppCfg, lib: Library):
+    def __init__(self, cfg: AppCfg, lib: Library, watch_flag=None):
         self.cfg = cfg
         self.lib = lib
+        self.watch_flag = watch_flag
         self.state_path = cfg.paths.state
         self.W, self.H = cfg.screen.width, cfg.screen.height
         flags = FULLSCREEN if cfg.screen.fullscreen else 0
@@ -51,6 +52,13 @@ class Viewer:
     def loop(self):
         font = pygame.font.SysFont(None, 36)
         while True:
+            # If watcher signaled changes, rescan here on the main thread
+            if self.watch_flag is not None and self.watch_flag.is_set():
+                print("[watchdog] running scan_once on viewer thread ...")
+                self.lib.scan_once(recursive=self.cfg.indexer.recursive,
+                                   ignore_hidden=self.cfg.indexer.ignore_hidden)
+                self.watch_flag.clear()
+                
             row = self.lib.get_by_id(self.current_id) if self.current_id else None
             if not row:
                 # draw message
