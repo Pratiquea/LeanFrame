@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>LeanFrame – Authorize Google Drive</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="refresh" content="5"> <!-- auto-refresh every 5s to progress -->
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:720px;margin:2rem auto;padding:0 1rem}
+    code{font-size:1.4rem}
+    .box{border:1px solid #ddd;border-radius:10px;padding:1rem;margin:1rem 0}
+    a.button{display:inline-block;padding:.7rem 1rem;border:1px solid #333;border-radius:8px;text-decoration:none}
+  </style>
+</head>
+<body>
+  <h2>Authorize LeanFrame to read your Google Drive</h2>
+  <div class="box">
+    <ol>
+      <li>Open <a href="{{ verification_url }}" target="_blank">{{ verification_url }}</a> on this phone.</li>
+      <li>Enter this code:</li>
+    </ol>
+    <p><code>{{ user_code }}</code></p>
+  </div>
+  <p>After you finish authorization, this page will move to the next step automatically.</p>
+</body>
+</html>

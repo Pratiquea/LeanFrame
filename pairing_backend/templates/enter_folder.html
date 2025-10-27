@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Select Drive Folder</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:720px;margin:2rem auto;padding:0 1rem}
+    input[type=text]{width:100%;padding:.6rem;border:1px solid #ccc;border-radius:8px}
+    button{padding:.6rem 1rem;border:1px solid #333;background:#fff;border-radius:8px}
+    .hint{color:#555}
+  </style>
+</head>
+<body>
+  <h2>Choose your Google Drive folder</h2>
+  <p>Paste a <b>folder link</b> or a folder <b>ID</b>. Examples:</p>
+  <ul class="hint">
+    <li>https://drive.google.com/drive/folders/1AbCDefGhijkLmNoPq</li>
+    <li>https://drive.google.com/open?id=1AbCDefGhijkLmNoPq</li>
+    <li>1AbCDefGhijkLmNoPq</li>
+  </ul>
+  <form method="post" action="/pair/folder">
+    <input name="folder_input" type="text" placeholder="Folder link or ID" required>
+    <p><button type="submit">Use this folder</button></p>
+  </form>
+</body>
+</html>

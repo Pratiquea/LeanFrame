@@ -1,119 +1,170 @@
-import os, time, secrets, string, urllib.parse, requests
-from typing import Dict
+import os, time, urllib.parse, re, requests
+from typing import Optional, Dict, Any
 from fastapi import FastAPI, Request, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from dotenv import load_dotenv
 
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+BASE_DIR = os.path.dirname(__file__)
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://rpi.local:8000")
-CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", f"{PUBLIC_BASE_URL}/oauth2/callback")
+CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
+CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 SCOPE = os.getenv("GOOGLE_SCOPE", "https://www.googleapis.com/auth/drive.readonly")
 
-if not CLIENT_ID or not CLIENT_SECRET:
-    raise RuntimeError("GOOGLE_CLIENT_ID/SECRET not configured")
+if not CLIENT_ID:
+    raise RuntimeError("Set GOOGLE_CLIENT_ID in pairing_backend/.env")
 
 app = FastAPI()
-templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "templates"))
+templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
-# Super-simple in-memory store: { code -> {"status": "pending"|"ready", "token": {...}, "folder_id": "id"} }
-PAIR_STORE: Dict[str, dict] = {}
+# Single-device in-memory state (no pairing code needed)
+STORE: Dict[str, Any] = {
+    # "device": {...}, "token": {...}, "folder_id": "id", "status": "pending|waiting_for_folder|ready"
+}
+DEVICE_KEY = "singleton"
 
-def urlsafe_state(n=32):
-    return "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(n))
+DEVICE_CODE_URL = "https://oauth2.googleapis.com/device/code"
+TOKEN_URL = "https://oauth2.googleapis.com/token"
 
-@app.post("/v1/pair/init")
-def pair_init(payload: dict):
-    code = payload.get("code")
-    if not code:
-        raise HTTPException(400, "code required")
-    PAIR_STORE.setdefault(code, {"status": "pending", "created_at": time.time()})
-    return {"status": "ok"}
+def now() -> float:
+    return time.time()
 
-@app.get("/v1/pair/{code}")
-def pair_status(code: str):
-    entry = PAIR_STORE.get(code)
-    if not entry:
-        return {"status": "pending"}  # not registered yet
-    if entry.get("status") == "ready":
-        return {
-            "status": "ready",
-            "folder_id": entry["folder_id"],
-            "token": entry["token"],
-        }
-    return {"status": "pending"}
+def extract_folder_id(s: str) -> Optional[str]:
+    s = s.strip()
+    # 1) Bare-looking ID (33+ chars, letters/numbers/_-)
+    if re.fullmatch(r"[A-Za-z0-9_-]{20,}", s):
+        return s
+    # 2) URL with id=...
+    m = re.search(r"[?&]id=([A-Za-z0-9_-]{20,})", s)
+    if m:
+        return m.group(1)
+    # 3) /folders/<id>
+    m = re.search(r"/folders/([A-Za-z0-9_-]{20,})", s)
+    if m:
+        return m.group(1)
+    return None
+
+def reset_device_flow():
+    STORE.clear()
+
+def device_flow_active() -> bool:
+    dev = STORE.get("device")
+    if not dev:
+        return False
+    return dev.get("expires_at", 0) > now()
+
+def device_flow_issue():
+    # Request a new device_code
+    data = {
+        "client_id": CLIENT_ID,
+        "scope": SCOPE,
+    }
+    r = requests.post(DEVICE_CODE_URL, data=data, timeout=15)
+    r.raise_for_status()
+    payload = r.json()
+    interval = payload.get("interval", 5)
+    expires_in = payload["expires_in"]
+    STORE["device"] = {
+        "device_code": payload["device_code"],
+        "user_code": payload["user_code"],
+        "verification_url": payload["verification_url"],   # often https://www.google.com/device
+        "interval": interval,
+        "issued_at": now(),
+        "expires_at": now() + expires_in,
+        "last_poll": 0.0,
+    }
+    STORE["status"] = "pending"
+
+def try_poll_token():
+    # Respect Google's polling interval
+    dev = STORE.get("device")
+    if not dev:
+        return
+    if now() < dev.get("last_poll", 0) + dev.get("interval", 5):
+        return
+    dev["last_poll"] = now()
+
+    data = {
+        "client_id": CLIENT_ID,
+        "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+        "device_code": dev["device_code"],
+    }
+    # The secret is OPTIONAL for installed-app clients; include if you created a Web client
+    if CLIENT_SECRET:
+        data["client_secret"] = CLIENT_SECRET
+
+    r = requests.post(TOKEN_URL, data=data, timeout=15)
+    if r.status_code == 200:
+        token = r.json()
+        # Expect refresh_token in response (after user completes)
+        STORE["token"] = token
+        STORE["status"] = "waiting_for_folder"
+        return
+
+    # 400 with various errors is typical while waiting
+    try:
+        err = r.json().get("error")
+    except Exception:
+        err = "unknown_error"
+    if err in ("authorization_pending", "slow_down"):
+        return
+    if err == "expired_token":
+        # user took too long; reset
+        reset_device_flow()
+        return
+    # any other error -> reset
+    reset_device_flow()
 
 @app.get("/pair", response_class=HTMLResponse)
-def pair_page(request: Request, code: str):
-    # Register code if not present
-    PAIR_STORE.setdefault(code, {"status": "pending", "created_at": time.time()})
-    return templates.TemplateResponse("pair.html", {"request": request, "code": code, "public_base": PUBLIC_BASE_URL})
+def pair_page(request: Request):
+    # Ensure we have a live device flow
+    if not device_flow_active():
+        reset_device_flow()
+        device_flow_issue()
+    # Opportunistic poll (page is refreshable)
+    try_poll_token()
 
-@app.get("/oauth2/start")
-def oauth2_start(code: str):
-    # We’ll stash the requested pairing code in the OAuth state and round-trip it.
-    state = code + ":" + urlsafe_state(8)
-    params = {
-        "client_id": CLIENT_ID,
-        "redirect_uri": REDIRECT_URI,
-        "response_type": "code",
-        "scope": SCOPE,
-        "access_type": "offline",
-        "prompt": "consent",
-        "state": state,
-        "include_granted_scopes": "true",
-    }
-    auth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params)
-    return RedirectResponse(auth_url)
+    status = STORE.get("status", "pending")
+    dev = STORE.get("device", {})
+    user_code = dev.get("user_code")
+    verification_url = dev.get("verification_url")
 
-@app.get("/oauth2/callback", response_class=HTMLResponse)
-def oauth2_callback(request: Request, code: str, state: str):
-    # Extract pairing code from state
-    if ":" not in state:
-        raise HTTPException(400, "invalid state")
-    pairing_code = state.split(":")[0]
+    if status == "pending":
+        return templates.TemplateResponse(
+            "pair_device_code.html",
+            {"request": request, "verification_url": verification_url, "user_code": user_code}
+        )
+    elif status == "waiting_for_folder":
+        return templates.TemplateResponse(
+            "enter_folder.html",
+            {"request": request}
+        )
+    elif status == "ready":
+        return HTMLResponse("<h3>All set! You can close this tab.</h3>")
+    else:
+        return HTMLResponse("<h3>Initializing… reload in a second.</h3>")
 
-    # Exchange code for tokens
-    data = {
-        "code": code,
-        "client_id": CLIENT_ID,
-        "client_secret": CLIENT_SECRET,
-        "redirect_uri": REDIRECT_URI,
-        "grant_type": "authorization_code",
-    }
-    token_resp = requests.post("https://oauth2.googleapis.com/token", data=data, timeout=15)
-    if token_resp.status_code != 200:
-        raise HTTPException(400, f"token exchange failed: {token_resp.text}")
-    token_json = token_resp.json()
-    # token_json includes access_token, expires_in, refresh_token (if offline), scope, token_type
+@app.post("/pair/folder", response_class=HTMLResponse)
+def pair_folder_submit(request: Request, folder_input: str = Form(...)):
+    fid = extract_folder_id(folder_input)
+    if not fid:
+        raise HTTPException(400, "Couldn't parse a valid Google Drive folder ID or URL.")
+    if STORE.get("status") != "waiting_for_folder" or "token" not in STORE:
+        raise HTTPException(400, "Not ready to accept a folder yet.")
+    STORE["folder_id"] = fid
+    STORE["status"] = "ready"
+    return HTMLResponse("<h3>Folder saved — you can close this tab.</h3>")
 
-    # List folders so the user can pick one (first 200 folders)
-    headers = {"Authorization": f"Bearer {token_json['access_token']}"}
-    # Drive v3 search for folders
-    q = "mimeType='application/vnd.google-apps.folder' and trashed=false"
-    list_url = "https://www.googleapis.com/drive/v3/files"
-    params = {"q": q, "fields": "files(id,name),nextPageToken", "pageSize": 200}
-    drive_resp = requests.get(list_url, headers=headers, params=params, timeout=15)
-    if drive_resp.status_code != 200:
-        raise HTTPException(400, f"drive list failed: {drive_resp.text}")
-    folders = drive_resp.json().get("files", [])
-
-    # Stash token temporarily in memory keyed by pairing code until user picks a folder
-    entry = PAIR_STORE.setdefault(pairing_code, {"status": "pending"})
-    entry["temp_token"] = token_json
-
-    return templates.TemplateResponse("folders.html", {"request": request, "code": pairing_code, "folders": folders})
-
-@app.post("/complete", response_class=HTMLResponse)
-def complete(request: Request, code: str = Form(...), folder_id: str = Form(...)):
-    entry = PAIR_STORE.get(code)
-    if not entry or "temp_token" not in entry:
-        raise HTTPException(400, "no active pairing")
-    entry["token"] = entry.pop("temp_token")
-    entry["folder_id"] = folder_id
-    entry["status"] = "ready"
-    return HTMLResponse("<h3>All set! You can close this tab.</h3>")
+# Device scripts poll here
+@app.get("/v1/pair", response_model=dict)
+def pair_status():
+    status = STORE.get("status", "pending")
+    if status == "ready":
+        return {
+            "status": "ready",
+            "folder_id": STORE.get("folder_id"),
+            "token": STORE.get("token"),
+        }
+    return {"status": status}
