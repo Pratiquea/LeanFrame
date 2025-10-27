@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import yaml
 from typing import Optional, List, Dict, Any
@@ -19,7 +19,7 @@ class RenderPaddingCfg:
 @dataclass
 class RenderCfg:
     mode: str = "cover" # "cover" | "contain"
-    padding: RenderPaddingCfg = RenderPaddingCfg()
+    padding: RenderPaddingCfg = field(default_factory=RenderPaddingCfg)
 
 @dataclass
 class PlaybackCfg:
