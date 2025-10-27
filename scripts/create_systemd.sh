@@ -9,7 +9,8 @@ VENV_BIN="${REPO_DIR}/.venv/bin"                   # existing venv bin
 PHOTO_DIR="${HOME_DIR}/DrivePhotos"                # local photo cache (for sync)
 RCLONE_REMOTE="gdrive"                             # rclone remote name
 DRIVE_PATH=""                             # Drive folder name OR ID (keep quotes for ID)
-
+RCLONE_CLIENT_ID=""
+RCLONE_CLIENT_SECRET=""
 # ===== Sanity checks =====
 if [ ! -d "${REPO_DIR}" ]; then
   echo "ERROR: Repo not found at ${REPO_DIR}"; exit 1
@@ -26,6 +27,8 @@ sudo tee /etc/leanframe.env >/dev/null <<EOF
 PHOTO_DIR=${PHOTO_DIR}
 RCLONE_REMOTE=${RCLONE_REMOTE}
 DRIVE_PATH="${DRIVE_PATH}"
+RCLONE_CLIENT_ID="${RCLONE_CLIENT_ID}"
+RCLONE_CLIENT_SECRET="${RCLONE_CLIENT_SECRET}"
 EOF
 
 # ===== Create user units (~/.config/systemd/user) =====
@@ -54,6 +57,7 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 EOF
+
 # Patch username in the unit paths
 sed -i "s|/home/rpi|${HOME_DIR}|g" "${USER_UNIT_DIR}/leanframe.service"
 
@@ -70,6 +74,60 @@ Unit=leanframe.service
 WantedBy=default.target
 EOF
 
+# leanframe-onboard.service
+cat > "${USER_UNIT_DIR}/leanframe-onboard.service" <<'EOF'
+[Unit]
+Description=LeanFrame first-boot pairing (user)
+Wants=graphical-session.target network-online.target
+After=graphical-session.target network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/rpi/gits/LeanFrame
+Environment=BACKEND_BASE=https://api.leanframe.example
+Environment=DISPLAY_URL_BASE=https://pair.leanframe.example
+ExecStart=/bin/bash -lc '/home/rpi/gits/LeanFrame/scripts/first_boot_pairing.sh'
+# Don't spam retries; user may need time to authorize on phone.
+
+[Install]
+WantedBy=default.target
+EOF
+
+# leanframe-sync.service (system service for rclone sync)
+sudo tee /etc/systemd/system/leanframe-sync.service >/dev/null <<'EOF'
+[Unit]
+Description=LeanFrame: rclone sync Drive -> local photo cache
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=rpi
+EnvironmentFile=/etc/leanframe.env
+ExecStartPre=/usr/bin/mkdir -p "${PHOTO_DIR}"
+ExecStart=/usr/bin/rclone sync "${RCLONE_REMOTE}:${DRIVE_PATH}" "${PHOTO_DIR}" \
+  --fast-list --transfers 4 --checkers 8 --create-empty-src-dirs=false
+EOF
+# Patch placeholder with actual user safely
+sudo sed -i "s|rpi|${USER_NAME}|g" /etc/systemd/system/leanframe-sync.service
+
+
+# Timer
+sudo tee /etc/systemd/system/leanframe-sync.timer >/dev/null <<EOF
+[Unit]
+Description=Run LeanFrame sync periodically (10 mins)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+Unit=leanframe-sync.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+
 # ===== Make the user manager survive boot (do once) =====
 sudo loginctl enable-linger "${USER_NAME}"
 
@@ -84,11 +142,21 @@ fi
 systemctl --user daemon-reload
 systemctl --user enable --now leanframe.service
 systemctl --user enable --now leanframe-wayland.path
+systemctl --user enable --now leanframe-onboard.service
+sudo systemctl enable --now leanframe-sync.timer
+# Warm sync (non-fatal if it fails; check logs with journalctl -u leanframe-sync)
+sudo systemctl start leanframe-sync.service || true
+
+
 
 echo "-------------------------------------------------------------"
 echo "Installed user units:"
 echo "  ${USER_UNIT_DIR}/leanframe.service"
 echo "  ${USER_UNIT_DIR}/leanframe-wayland.path"
+echo "  ${USER_UNIT_DIR}/leanframe-onboard.service"
+echo "Installed system units:"
+echo "  /etc/systemd/system/leanframe-sync.service"
+echo "  /etc/systemd/system/leanframe-sync.timer"
 echo
 echo "Global env: /etc/leanframe.env"
 echo "  PHOTO_DIR=${PHOTO_DIR}"
