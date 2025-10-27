@@ -28,7 +28,6 @@ rclone config
 ```
 https://rclone.org/remote_setup/ :very imp
 
-
 ### 3) Run
 ```
 python -m photoframe
@@ -39,6 +38,10 @@ The viewer will take over the screen. The API will listen on http://0.0.0.0:8765
 ```
 sudo ./scripts/create_systemd.sh
 ```
+```
+sudo loginctl enable-linger rpi
+```
+This keeps your systemd --user running across boots (even before you open a terminal).
 
 ### 5) Uploads (Android/iOS)
 

@@ -11,6 +11,17 @@ class ScreenCfg:
     cursor_hidden: bool = True
 
 @dataclass
+class RenderPaddingCfg:
+    style: str = "blur" # "solid" | "blur"
+    color: str = "#000000" # used when style == solid
+
+
+@dataclass
+class RenderCfg:
+    mode: str = "cover" # "cover" | "contain"
+    padding: RenderPaddingCfg = RenderPaddingCfg()
+
+@dataclass
 class PlaybackCfg:
     default_image_seconds: float = 12.0
     shuffle: bool = True
@@ -74,6 +85,7 @@ class SyncCfg:
 @dataclass
 class AppCfg:
     screen: ScreenCfg
+    render: RenderCfg
     playback: PlaybackCfg
     paths: PathsCfg
     server: ServerCfg
@@ -84,62 +96,65 @@ class AppCfg:
     @staticmethod
     def load(path: Path) -> "AppCfg":
         data = yaml.safe_load(Path(path).read_text())
-
         screen = ScreenCfg(**data["screen"])
 
+        # render
+        r = data.get("render", {})
+        padding = r.get("padding", {})
+        render = RenderCfg(
+        mode=r.get("mode", "cover"),
+        padding=RenderPaddingCfg(
+        style=padding.get("style", "blur"),
+        color=padding.get("color", "#000000"),
+        ),
+        )
+
+        # playback
         pb = dict(data.get("playback", {}))
         transitions = pb.pop("transitions", {}) or {}
         playback = PlaybackCfg(
-            **pb,
-            transitions_crossfade=bool(transitions.get("crossfade", True)),
-            crossfade_ms=int(transitions.get("crossfade_ms", 350)),
+        **pb,
+        transitions_crossfade=bool(transitions.get("crossfade", True)),
+        crossfade_ms=int(transitions.get("crossfade_ms", 350)),
         )
 
         p = data["paths"]
         paths = PathsCfg(
-            library=Path(p["library"]).expanduser(),
-            import_dir=Path(p["import"]).expanduser(),
-            state=Path(p["state"]).expanduser(),
-            db=Path(p["db"]).expanduser(),
+        library=Path(p["library"]).expanduser(),
+        import_dir=Path(p["import"]).expanduser(),
+        state=Path(p["state"]).expanduser(),
+        db=Path(p["db"]).expanduser(),
         )
-        print(f"[config] library path: {paths.library}")
 
         server = ServerCfg(**data["server"])
         conversion = ConvertCfg(**data["conversion"])
         indexer = IndexerCfg(**data["indexer"])
 
-        # sync block
+        # sync
         sync_block = data.get("sync")
         if sync_block:
-            mode = sync_block.get("mode", "off")
-            # rclone sub-block
             rclone_block = sync_block.get("rclone")
             rclone_cfg = None
             if rclone_block:
-                jobs = [
-                    SyncRcloneJob(**j)
-                    for j in (rclone_block.get("jobs") or [])
-                ]
-                rclone_cfg = SyncRcloneCfg(
-                    bin=rclone_block.get("bin", "rclone"),
-                    jobs=jobs
-                )
+                jobs = [SyncRcloneJob(**j) for j in (rclone_block.get("jobs") or [])]
+                rclone_cfg = SyncRcloneCfg(bin=rclone_block.get("bin", "rclone"), jobs=jobs)
             sync_cfg = SyncCfg(
-                enabled=bool(sync_block.get("enabled", False)),
-                mode=mode,
-                interval_minutes=int(sync_block.get("interval_minutes", 10)),
-                rclone=rclone_cfg,
-                photos_api=sync_block.get("photos_api")
+            enabled=bool(sync_block.get("enabled", False)),
+            mode=sync_block.get("mode", "off"),
+            interval_minutes=int(sync_block.get("interval_minutes", 10)),
+            rclone=rclone_cfg,
+            photos_api=sync_block.get("photos_api"),
             )
         else:
-            sync_cfg = SyncCfg(enabled=False, mode="off", interval_minutes=10)
+            sync_cfg = SyncCfg(enabled=False, mode="off")
 
         return AppCfg(
             screen=screen,
+            render=render,
             playback=playback,
             paths=paths,
             server=server,
             conversion=conversion,
             indexer=indexer,
-            sync=sync_cfg,   
-        )
+            sync=sync_cfg,
+            )

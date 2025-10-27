@@ -2,7 +2,7 @@ import os, json, time, subprocess, random
 from pathlib import Path
 import pygame
 from pygame.locals import FULLSCREEN
-# from .utils import load_image_cover
+from .utils import load_image_surface
 from .indexer import Library
 from .config import AppCfg
 from .constants import SUPPORTED_IMAGES, SUPPORTED_VIDEOS
@@ -19,7 +19,7 @@ class Viewer:
         flags = FULLSCREEN if cfg.screen.fullscreen else 0
         pygame.init()
         self.screen = pygame.display.set_mode((self.W, self.H), flags)
-        self.loader = FastImageLoader(self.screen.get_size())
+        self.loader = FastImageLoader(self.screen.get_size(), self.cfg.render)
         pygame.mouse.set_visible(not cfg.screen.cursor_hidden)
         self.clock = pygame.time.Clock()
         self.crossfade_ms = cfg.playback.crossfade_ms if cfg.playback.transitions_crossfade else 0
@@ -58,7 +58,7 @@ class Viewer:
                 self.lib.scan_once(recursive=self.cfg.indexer.recursive,
                                    ignore_hidden=self.cfg.indexer.ignore_hidden)
                 self.watch_flag.clear()
-                
+
             row = self.lib.get_by_id(self.current_id) if self.current_id else None
             if not row:
                 # draw message
