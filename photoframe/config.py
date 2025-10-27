@@ -107,6 +107,7 @@ class AppCfg:
         padding=RenderPaddingCfg(
         style=padding.get("style", "blur"),
         color=padding.get("color", "#000000"),
+        blur_amount=padding.get("blur_amount", "28"),
         ),
         )
 
