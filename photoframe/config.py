@@ -14,6 +14,7 @@ class ScreenCfg:
 class RenderPaddingCfg:
     style: str = "blur" # "solid" | "blur"
     color: str = "#000000" # used when style == solid
+    blur_amount: int = "28"  # used when style == solid, higher = more blur
 
 
 @dataclass

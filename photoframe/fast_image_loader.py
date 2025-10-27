@@ -89,7 +89,7 @@ class FastImageLoader:
             return np.asarray(canvas)
 
         mode = (self.render.mode or "cover").lower()  # "cover" | "contain"
-        blur_amt = self.render.padding.blur_amount if self.render and self.render.padding else 28
+        blur_amt = int(self.render.padding.blur_amount) if self.render and self.render.padding else 28
         # clilp blur amount to reasonable range
         blur_amt = max(1, min(blur_amt, 100))
         pad_style = (self.render.padding.style if self.render.padding else "blur").lower()
