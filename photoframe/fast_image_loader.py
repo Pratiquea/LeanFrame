@@ -89,6 +89,9 @@ class FastImageLoader:
             return np.asarray(canvas)
 
         mode = (self.render.mode or "cover").lower()  # "cover" | "contain"
+        blur_amt = self.render.padding.blur_amount if self.render and self.render.padding else 28
+        # clilp blur amount to reasonable range
+        blur_amt = max(1, min(blur_amt, 100))
         pad_style = (self.render.padding.style if self.render.padding else "blur").lower()
         pad_color_rgb = self._hex_to_rgb(self.render.padding.color if self.render.padding else "#000000")
 
@@ -121,7 +124,7 @@ class FastImageLoader:
             bg = bg.crop((l, t, l + W, t + H))
             # blur + slight darken to emphasize main image
             try:
-                bg = bg.filter(ImageFilter.GaussianBlur(radius=28))
+                bg = bg.filter(ImageFilter.GaussianBlur(radius=blur_amt))
                 # optional: subtle dim
                 bg = Image.blend(bg, Image.new("RGB", bg.size, (0, 0, 0)), alpha=0.08)
             except Exception:
