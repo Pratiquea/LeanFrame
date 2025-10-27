@@ -2,7 +2,7 @@ import os, json, time, subprocess, random
 from pathlib import Path
 import pygame
 from pygame.locals import FULLSCREEN
-from .utils import load_image_surface
+# from .utils import load_image_surface
 from .indexer import Library
 from .config import AppCfg
 from .constants import SUPPORTED_IMAGES, SUPPORTED_VIDEOS
