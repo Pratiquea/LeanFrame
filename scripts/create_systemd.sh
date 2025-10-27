@@ -131,7 +131,7 @@ EOF
 # ===== Make the user manager survive boot (do once) =====
 sudo loginctl enable-linger "${USER_NAME}"
 
-# ===== Disable and remove any old system service (optional cleanup) =====
+# ===== Disable and remove any old system service  =====
 if systemctl list-unit-files | grep -q '^leanframe.service'; then
   sudo systemctl disable --now leanframe.service || true
   sudo rm -f /etc/systemd/system/leanframe.service || true
