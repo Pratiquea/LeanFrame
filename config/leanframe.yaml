@@ -13,7 +13,7 @@ screen:
 render:
   mode: contain          # cover | contain
   padding:
-    style: blur        # solid | blur
+    style: mirror        # solid | blur | average | mirror | stretch | gradient_linear | gradient_radial | glass | motion | texture | dim
     color: "#000000"   # only used when style=solid
     blur_amount: 10    # only when style is blur (Higher = more blur)
     

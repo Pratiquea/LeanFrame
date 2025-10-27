@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from collections import OrderedDict
-from PIL import Image, ImageOps, ImageFilter
+from PIL import Image, ImageOps, ImageFilter, ImageDraw 
 import numpy as np
 import pygame
 
@@ -69,6 +69,126 @@ class FastImageLoader:
         except Exception:
             return (0, 0, 0)
 
+    @staticmethod
+    def _avg_color(img: Image.Image) -> tuple[int, int, int]:
+        # Compute quickly on tiny thumbnail
+        t = img.convert("RGB")
+        t.thumbnail((32, 32), Image.LANCZOS)
+        arr = np.asarray(t, dtype=np.uint8).reshape(-1, 3)
+        m = arr.mean(axis=0).astype(np.uint8)
+        return (int(m[0]), int(m[1]), int(m[2]))
+
+    @staticmethod
+    def _lerp(a: tuple[int,int,int], b: tuple[int,int,int], t: float) -> tuple[int,int,int]:
+        return (int(a[0] + (b[0]-a[0])*t),
+                int(a[1] + (b[1]-a[1])*t),
+                int(a[2] + (b[2]-a[2])*t))
+
+    def _make_linear_gradient(self, size, c0, c1, vertical=True) -> Image.Image:
+        W, H = size
+        base = Image.new("RGB", (W, H), c0)
+        overlay = Image.new("RGB", (W, H), c1)
+        mask = Image.new("L", (W, H))
+        draw = ImageDraw.Draw(mask)
+        if vertical:
+            for y in range(H):
+                draw.line((0, y, W, y), fill=int(255 * y / max(1, H-1)))
+        else:
+            for x in range(W):
+                draw.line((x, 0, x, H), fill=int(255 * x / max(1, W-1)))
+        return Image.composite(overlay, base, mask)
+
+    def _make_radial_gradient(self, size, c0, c1) -> Image.Image:
+        W, H = size
+        cx, cy = W/2.0, H/2.0
+        y, x = np.ogrid[:H, :W]
+        r = np.sqrt((x - cx)**2 + (y - cy)**2)
+        r /= r.max() if r.max() > 0 else 1.0
+        # mask 0..255
+        mask = (r * 255.0).astype(np.uint8)
+        mask_img = Image.fromarray(mask, mode="L")
+        base = Image.new("RGB", (W, H), c0)
+        overlay = Image.new("RGB", (W, H), c1)
+        return Image.composite(overlay, base, mask_img)
+
+    def _mirror_pad_canvas(self, src: Image.Image, size) -> Image.Image:
+        """Create a mirror-padded canvas (reflect edges) then center-crop to size."""
+        W, H = size
+        w, h = src.size
+        # scale to fit (contain), then mirror-pad around to at least W×H
+        s = min(W / w, H / h)
+        nw, nh = max(1, int(w * s)), max(1, int(h * s))
+        main = src.resize((nw, nh), Image.LANCZOS).convert("RGB")
+        pad_x = max(0, (W - nw) // 2)
+        pad_y = max(0, (H - nh) // 2)
+        # Build big canvas by tiling mirrors (left/right/top/bottom)
+        canvas = Image.new("RGB", (nw + 2*pad_x, nh + 2*pad_y))
+        # center
+        canvas.paste(main, (pad_x, pad_y))
+        # mirror helpers
+        left = main.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        right = left
+        top = main.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+        bottom = top
+        # horizontal bands
+        if pad_x:
+            canvas.paste(left.crop((nw - pad_x, 0, nw, nh)), (0, pad_y))
+            canvas.paste(main.crop((0, 0, pad_x, nh)).transpose(Image.Transpose.FLIP_LEFT_RIGHT), (pad_x + nw, pad_y))
+        # vertical bands
+        if pad_y:
+            canvas.paste(top.crop((0, nh - pad_y, nw, nh)), (pad_x, 0))
+            canvas.paste(main.crop((0, 0, nw, pad_y)).transpose(Image.Transpose.FLIP_TOP_BOTTOM), (pad_x, pad_y + nh))
+        # corners
+        if pad_x and pad_y:
+            tl = main.crop((0, 0, pad_x, pad_y)).transpose(Image.Transpose.ROTATE_180)
+            tr = main.crop((nw - pad_x, 0, nw, pad_y)).transpose(Image.Transpose.ROTATE_180)
+            bl = main.crop((0, nh - pad_y, pad_x, nh)).transpose(Image.Transpose.ROTATE_180)
+            br = main.crop((nw - pad_x, nh - pad_y, nw, nh)).transpose(Image.Transpose.ROTATE_180)
+            canvas.paste(tl, (0, 0))
+            canvas.paste(tr, (pad_x + nw, 0))
+            canvas.paste(bl, (0, pad_y + nh))
+            canvas.paste(br, (pad_x + nw, pad_y + nh))
+        # final crop (already exact, but keep consistent)
+        return canvas.crop((0, 0, W, H))
+
+    def _stretch_pad_canvas(self, src: Image.Image, size) -> Image.Image:
+        """Pixel-stretch edges to fill remaining area."""
+        W, H = size
+        w, h = src.size
+        s = min(W / w, H / h)
+        nw, nh = max(1, int(w * s)), max(1, int(h * s))
+        main = src.resize((nw, nh), Image.LANCZOS).convert("RGB")
+        bg = Image.new("RGB", (W, H))
+        off = ((W - nw) // 2, (H - nh) // 2)
+        # stretch left/right
+        pad_left = off[0]
+        pad_right = W - (off[0] + nw)
+        pad_top = off[1]
+        pad_bottom = H - (off[1] + nh)
+        if pad_left > 0:
+            strip = main.crop((0, 0, 1, nh)).resize((pad_left, nh))
+            bg.paste(strip, (0, off[1]))
+        if pad_right > 0:
+            strip = main.crop((nw-1, 0, nw, nh)).resize((pad_right, nh))
+            bg.paste(strip, (off[0]+nw, off[1]))
+        if pad_top > 0:
+            strip = main.crop((0, 0, nw, 1)).resize((nw, pad_top))
+            bg.paste(strip, (off[0], 0))
+        if pad_bottom > 0:
+            strip = main.crop((0, nh-1, nw, nh)).resize((nw, pad_bottom))
+            bg.paste(strip, (off[0], off[1]+nh))
+        bg.paste(main, off)
+        return bg
+
+    def _texture_canvas(self, size, base_color=(12,12,12)) -> Image.Image:
+        """Generate a subtle grain texture (no assets required)."""
+        W, H = size
+        rng = np.random.default_rng(12345)
+        noise = rng.normal(0, 8, (H, W, 3)).astype(np.int16)
+        base = np.full((H, W, 3), base_color, dtype=np.int16)
+        arr = np.clip(base + noise, 0, 255).astype(np.uint8)
+        return Image.fromarray(arr, mode="RGB").filter(ImageFilter.GaussianBlur(radius=0.5))
+
     def _compose_frame(self, src_img: Image.Image, orientation_tag: int) -> np.ndarray:
         """
         Returns an RGB numpy array with shape (H, W, 3), already composed to the
@@ -113,7 +233,7 @@ class FastImageLoader:
         # Background canvas
         if pad_style == "solid":
             bg = Image.new("RGB", (W, H), pad_color_rgb)
-        else:
+        elif pad_style == "blur":
             # "blur" modern padding: take a cover-scaled version, heavily blur
             s = max(W / w, H / h)
             cw, ch = max(1, int(w * s)), max(1, int(h * s))
@@ -129,6 +249,59 @@ class FastImageLoader:
                 bg = Image.blend(bg, Image.new("RGB", bg.size, (0, 0, 0)), alpha=0.08)
             except Exception:
                 pass
+        elif pad_style == "average":
+            avg = self._avg_color(src_img)
+            bg = Image.new("RGB", (W, H), avg)
+        elif pad_style == "mirror":
+            bg = self._mirror_pad_canvas(src_img, (W, H))
+        elif pad_style == "stretch":
+            bg = self._stretch_pad_canvas(src_img, (W, H))
+        elif pad_style == "gradient_linear":
+            c0 = self._avg_color(src_img)
+            c1 = pad_color_rgb or (0, 0, 0)
+            bg = self._make_linear_gradient((W, H), c0, c1, vertical=True)
+        elif pad_style == "gradient_radial":
+            c0 = self._avg_color(src_img)
+            c1 = pad_color_rgb or (0, 0, 0)
+            bg = self._make_radial_gradient((W, H), c0, c1)
+        elif pad_style == "glass":
+            # frosted glass = blur + slight brighten
+            s = max(W / w, H / h)
+            cw, ch = max(1, int(w * s)), max(1, int(h * s))
+            bg = src_img.resize((cw, ch), Image.LANCZOS).convert("RGB")
+            l = max(0, (cw - W) // 2); t = max(0, (ch - H) // 2)
+            bg = bg.crop((l, t, l + W, t + H)).filter(ImageFilter.GaussianBlur(radius=18))
+            # brighten a tad by blending toward white
+            bg = Image.blend(bg, Image.new("RGB", (W, H), (255, 255, 255)), alpha=0.06)
+        elif pad_style == "motion":
+            # cheap directional blur: average a few shifted copies
+            s = max(W / w, H / h)
+            cw, ch = max(1, int(w * s)), max(1, int(h * s))
+            base = src_img.resize((cw, ch), Image.LANCZOS).convert("RGB")
+            l = max(0, (cw - W) // 2); t = max(0, (ch - H) // 2)
+            base = base.crop((l, t, l + W, t + H))
+            acc = np.zeros((H, W, 3), dtype=np.float32)
+            for dx in (-4, -2, 0, 2, 4):
+                shifted = Image.new("RGB", (W, H))
+                shifted.paste(base, (dx, 0))
+                acc += np.asarray(shifted, dtype=np.float32)
+            acc /= 5.0
+            bg = Image.fromarray(np.clip(acc, 0, 255).astype(np.uint8), "RGB")
+        elif pad_style == "texture":
+            c0 = self._avg_color(src_img)
+            bg = self._texture_canvas((W, H), base_color=c0)
+        elif pad_style == "dim":
+            avg = self._avg_color(src_img)
+            bg = Image.new("RGB", (W, H), avg)
+            bg = Image.blend(bg, Image.new("RGB", (W, H), (0, 0, 0)), alpha=0.4)
+        else:
+            # default fallback = blur
+            s = max(W / w, H / h)
+            cw, ch = max(1, int(w * s)), max(1, int(h * s))
+            bg = src_img.resize((cw, ch), Image.LANCZOS).convert("RGB")
+            l = max(0, (cw - W) // 2); t = max(0, (ch - H) // 2)
+            bg = bg.crop((l, t, l + W, t + H)).filter(ImageFilter.GaussianBlur(radius=24))
+            bg = Image.blend(bg, Image.new("RGB", (W, H), (0, 0, 0)), alpha=0.08)
 
         # Paste main centered
         canvas = bg.copy()
