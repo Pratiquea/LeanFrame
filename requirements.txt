@@ -7,3 +7,6 @@ watchdog==4.0.2
 pyyaml==6.0.2
 python-multipart
 PyTurboJPEG
+jinja2
+requests
+python-dotenv

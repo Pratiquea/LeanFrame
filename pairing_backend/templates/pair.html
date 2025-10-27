@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>LeanFrame – Pair</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>body{font-family:sans-serif;max-width:720px;margin:2rem auto;padding:0 1rem} a.button{display:inline-block;padding:.8rem 1rem;border:1px solid #333;border-radius:8px;text-decoration:none}</style>
+</head>
+<body>
+  <h2>Connect Google Drive</h2>
+  <p>Pairing code: <b>{{ code }}</b></p>
+  <ol>
+    <li>Tap the button below to sign in with Google.</li>
+    <li>Choose the Drive folder to use with LeanFrame.</li>
+    <li>Return to your TV – it will start automatically.</li>
+  </ol>
+  <p><a class="button" href="{{ public_base }}/oauth2/start?code={{ code }}">Sign in with Google</a></p>
+</body>
+</html>
