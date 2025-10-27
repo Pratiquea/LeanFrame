@@ -180,14 +180,14 @@ class FastImageLoader:
         bg.paste(main, off)
         return bg
 
-    def _texture_canvas(self, size, base_color=(12,12,12)) -> Image.Image:
+    def _texture_canvas(self, size, base_color=(12,12,12), blur_amt = 0.5) -> Image.Image:
         """Generate a subtle grain texture (no assets required)."""
         W, H = size
         rng = np.random.default_rng(12345)
         noise = rng.normal(0, 8, (H, W, 3)).astype(np.int16)
         base = np.full((H, W, 3), base_color, dtype=np.int16)
         arr = np.clip(base + noise, 0, 255).astype(np.uint8)
-        return Image.fromarray(arr, mode="RGB").filter(ImageFilter.GaussianBlur(radius=0.5))
+        return Image.fromarray(arr, mode="RGB").filter(ImageFilter.GaussianBlur(radius=blur_amt))
 
     def _compose_frame(self, src_img: Image.Image, orientation_tag: int) -> np.ndarray:
         """
@@ -270,7 +270,7 @@ class FastImageLoader:
             cw, ch = max(1, int(w * s)), max(1, int(h * s))
             bg = src_img.resize((cw, ch), Image.LANCZOS).convert("RGB")
             l = max(0, (cw - W) // 2); t = max(0, (ch - H) // 2)
-            bg = bg.crop((l, t, l + W, t + H)).filter(ImageFilter.GaussianBlur(radius=18))
+            bg = bg.crop((l, t, l + W, t + H)).filter(ImageFilter.GaussianBlur(radius=blur_amt))
             # brighten a tad by blending toward white
             bg = Image.blend(bg, Image.new("RGB", (W, H), (255, 255, 255)), alpha=0.06)
         elif pad_style == "motion":
@@ -300,7 +300,7 @@ class FastImageLoader:
             cw, ch = max(1, int(w * s)), max(1, int(h * s))
             bg = src_img.resize((cw, ch), Image.LANCZOS).convert("RGB")
             l = max(0, (cw - W) // 2); t = max(0, (ch - H) // 2)
-            bg = bg.crop((l, t, l + W, t + H)).filter(ImageFilter.GaussianBlur(radius=24))
+            bg = bg.crop((l, t, l + W, t + H)).filter(ImageFilter.GaussianBlur(radius=blur_amt))
             bg = Image.blend(bg, Image.new("RGB", (W, H), (0, 0, 0)), alpha=0.08)
 
         # Paste main centered

@@ -13,9 +13,9 @@ screen:
 render:
   mode: contain          # cover | contain
   padding:
-    style: mirror        # solid | blur | average | mirror | stretch | gradient_linear | gradient_radial | glass | motion | texture | dim
+    style: motion        # solid | blur | average | mirror | stretch | gradient_linear | gradient_radial | glass | motion | texture | dim
     color: "#000000"   # only used when style=solid
-    blur_amount: 10    # only when style is blur (Higher = more blur)
+    blur_amount: 10    # only when style is blur | glass (Higher = more blur)
     
 # Playback
 playback:
