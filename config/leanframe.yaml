@@ -11,10 +11,11 @@ screen:
 # style: solid | blur
 # color: "#000000" # only used when style=solid
 render:
-  mode: cover          # cover | contain
+  mode: contain          # cover | contain
   padding:
     style: blur        # solid | blur
     color: "#000000"   # only used when style=solid
+    blur_amount: 10	   # only when style is blur (Higher = more blur)
 
 # Playback
 playback:
