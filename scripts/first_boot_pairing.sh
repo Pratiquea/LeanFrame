@@ -1,79 +1,47 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# --------- configurable ----------
-BACKEND_BASE="${BACKEND_BASE:-http://rpi.local:8000}"      # pairing backend base
+BACKEND_BASE="${BACKEND_BASE:-http://rpi.local:8000}"      # pairing backend on the Pi
 DISPLAY_URL_BASE="${DISPLAY_URL_BASE:-http://rpi.local:8000}"
-ENV_FILE="/etc/leanframe.env"                               # read-only (we'll sudo-append later)
-PAIR_FILE="$HOME/.config/leanframe/pair"                    # USER-SPACE (no sudo)
+ENV_FILE="/etc/leanframe.env"
 RCLONE_CONF="$HOME/.config/rclone/rclone.conf"
 REMOTE_NAME="${RCLONE_REMOTE:-gdrive}"
 POLL_SECONDS="${POLL_SECONDS:-2}"
 POLL_MAX_TRIES="${POLL_MAX_TRIES:-450}"                     # ~15 min
-# ----------------------------------
 
-mkdir -p "$(dirname "$RCLONE_CONF")" "$(dirname "$PAIR_FILE")"
+mkdir -p "$(dirname "$RCLONE_CONF")"
 
 # Load env if present (defines RCLONE_REMOTE / DRIVE_PATH optionally)
 if [ -f "$ENV_FILE" ]; then . "$ENV_FILE"; fi
 
-# Helper: random code like ABCD-1234
-gen_code() {
-  local a b
-  a="$(tr -dc 'A-Z0-9' </dev/urandom | head -c4)"
-  b="$(tr -dc 'A-Z0-9' </dev/urandom | head -c4)"
-  printf '%s-%s' "$a" "$b"
-}
-
-# Create/read pairing code (USER-SPACE; no sudo)
-if [ -f "$PAIR_FILE" ]; then
-  CODE="$(cat "$PAIR_FILE")"
-else
-  CODE="$(gen_code)"
-  echo "$CODE" > "$PAIR_FILE"
-  chmod 600 "$PAIR_FILE"
-fi
-
-PAIR_URL="${DISPLAY_URL_BASE}/pair?code=${CODE}"
+PAIR_URL="${DISPLAY_URL_BASE}/pair"
 
 echo "============================================"
-echo " LeanFrame pairing needed"
+echo " LeanFrame setup"
 echo " 1) On your phone: ${PAIR_URL}"
-echo " 2) Enter code:    ${CODE}"
-echo " 3) Sign into Google, pick the photo folder."
+echo " 2) Follow Google steps at google.com/device"
+echo " 3) Paste your Drive folder link/ID, then return here."
 echo "============================================"
 
-# Optional QR (safe to skip if not installed)
-if command -v qrencode >/dev/null 2>&1; then
-  echo "(QR):"
-  qrencode -t ANSIUTF8 "$PAIR_URL" || true
-fi
-
-# Register with backend (idempotent; never fail the script)
-DEVICE_ID="$(cat /etc/machine-id 2>/dev/null || hostname)"
-curl -fsS -X POST "$BACKEND_BASE/v1/pair/init" \
-  -H "Content-Type: application/json" \
-  -d "{\"code\":\"$CODE\",\"device_id\":\"$DEVICE_ID\"}" >/dev/null 2>&1 || true
-
-echo "Waiting for authorization + folder selection from phone..."
+echo "Waiting for authorization + folder selection..."
 TRIES=0
 while [ $TRIES -lt "$POLL_MAX_TRIES" ]; do
-  RESP="$(curl -fsS "$BACKEND_BASE/v1/pair/${CODE}" 2>/dev/null || true)"
-  if echo "$RESP" | grep -q '"status":"ready"'; then
+  RESP="$(curl -fsS "$BACKEND_BASE/v1/pair" 2>/dev/null || true)"
+  STATUS="$(echo "$RESP" | jq -r '.status // empty')"
+  if [ "$STATUS" = "ready" ]; then
     TOKEN_JSON="$(echo "$RESP" | jq -c '.token')"
     FOLDER_ID="$(echo "$RESP" | jq -r '.folder_id')"
-    if [ -n "${FOLDER_ID:-}" ] && [ "$FOLDER_ID" != "null" ]; then
+    if [ -n "$FOLDER_ID" ] && [ "$FOLDER_ID" != "null" ]; then
       echo "Received folder_id=$FOLDER_ID"
 
-      # Persist DRIVE_PATH in /etc/leanframe.env (needs sudo once; we do it *after* printing)
-      if [ -w "$ENV_FILE" ]; then
-        sed -i "s|^DRIVE_PATH=.*$|DRIVE_PATH=\"$FOLDER_ID\"|" "$ENV_FILE" || true
+      # Persist DRIVE_PATH
+      if grep -q '^DRIVE_PATH=' "$ENV_FILE" 2>/dev/null; then
+        sudo sed -i "s|^DRIVE_PATH=.*$|DRIVE_PATH=\"$FOLDER_ID\"|" "$ENV_FILE" || true
       else
-        echo "Updating $ENV_FILE with DRIVE_PATH requires sudo..."
         echo "DRIVE_PATH=\"$FOLDER_ID\"" | sudo tee -a "$ENV_FILE" >/dev/null
       fi
 
-      # Configure rclone (user-local; no sudo)
+      # Configure rclone (user-local; no browser)
       rclone config create "$REMOTE_NAME" drive \
         scope=drive.readonly \
         root_folder_id="$FOLDER_ID" \
@@ -90,9 +58,9 @@ while [ $TRIES -lt "$POLL_MAX_TRIES" ]; do
       fi
 
       # Kick steady-state services
-      sudo systemctl enable --now leanframe-sync.timer || true     # system timer
+      sudo systemctl enable --now leanframe-sync.timer || true
       systemctl --user daemon-reload || true
-      systemctl --user enable --now leanframe.service || true      # user GUI
+      systemctl --user enable --now leanframe.service || true
       echo "Onboarding complete."
       exit 0
     fi
@@ -101,5 +69,5 @@ while [ $TRIES -lt "$POLL_MAX_TRIES" ]; do
   sleep "$POLL_SECONDS"
 done
 
-echo "Pairing timed out. Open ${PAIR_URL} again to finish."
+echo "Setup timed out. Open ${PAIR_URL} again to finish."
 exit 1
