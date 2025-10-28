@@ -108,7 +108,7 @@ class InheritedAppState extends InheritedNotifier<AppState> {
 }
 
 /// ----------------------------------------------------------------------------
-/// Home (system picker only)
+/// Home (system picker; new UI tweaks)
 /// ----------------------------------------------------------------------------
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -125,12 +125,24 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final state = InheritedAppState.of(context);
 
+    final Color statusBarColor = state.connected ? Colors.green.shade600 : Colors.grey.shade600;
+    final Color statusBarText = Colors.white;
+
     return Scaffold(
+      // 2) Hamburger menu (Drawer)
+      drawer: const _AppDrawer(),
+
       appBar: AppBar(
         title: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Flexible(child: Text(state.frameName, overflow: TextOverflow.ellipsis)),
+            Flexible(
+              child: Text(
+                state.frameName,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ),
             const SizedBox(width: 8),
             InkWell(
               onTap: () async {
@@ -143,6 +155,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         centerTitle: true,
         actions: [
+          // ✅ Keep this little connection dot next to the gear icon
           Icon(
             state.connected ? Icons.circle : Icons.circle_outlined,
             color: state.connected ? Colors.green : Colors.grey,
@@ -172,6 +185,7 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
 
+
       body: Column(
         children: [
           const SizedBox(height: 8),
@@ -181,15 +195,19 @@ class _HomeScreenState extends State<HomeScreen> {
               groupValue: tab,
               onValueChanged: (v) => setState(() => tab = v),
               children: const {
-                HubTab.activity: Padding(padding: EdgeInsets.all(8), child: Text("Activity")),
                 HubTab.photos: Padding(
                   padding: EdgeInsets.all(8),
                   child: Row(mainAxisSize: MainAxisSize.min, children: [
                     Icon(Icons.grid_on, size: 16), SizedBox(width: 6), Text("Photos")
                   ]),
                 ),
+                HubTab.activity: Padding(
+                  padding: EdgeInsets.all(8),
+                  child: Text("Activity"),
+                ),
               },
             ),
+
           ),
           const SizedBox(height: 8),
           if (tab == HubTab.photos)
@@ -203,13 +221,26 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
 
-      // System picker + upload
-      floatingActionButton: FloatingActionButton.extended(
-        backgroundColor: Colors.amber,
-        foregroundColor: Colors.black,
-        icon: const Icon(Icons.add),
-        label: const Text("Add Photos"),
-        onPressed: () async => _runSystemPickerFlow(context),
+      // 1) Wide "Add Photos" bottom button (nearly full width with side padding)
+      bottomNavigationBar: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12), // leaves space left & right
+          child: SizedBox(
+            width: double.infinity,
+            height: 56,
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.amber,
+                foregroundColor: Colors.black,
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              ),
+              onPressed: () async => _runSystemPickerFlow(context),
+              icon: const Icon(Icons.add),
+              label: const Text("Add Photos"),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -257,6 +288,68 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text("Uploaded $ok file(s)${fail > 0 ? ", $fail failed" : ""}")),
+    );
+  }
+}
+
+/// Drawer with two sections:
+///  - Section 1: App name + '>' right-aligned
+///  - Section 2: Frame name + green/gray indicator
+class _AppDrawer extends StatelessWidget {
+  const _AppDrawer();
+
+  @override
+  Widget build(BuildContext context) {
+    final state = InheritedAppState.of(context);
+    final dotColor = state.connected ? Colors.green : Colors.grey;
+
+    return Drawer(
+      child: SafeArea(
+        child: ListView(
+          padding: EdgeInsets.zero,
+          children: [
+            // Section 1
+            ListTile(
+              title: Row(
+                children: [
+                  const Expanded(
+                    child: Text(
+                      "LeanFrame",
+                      style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
+                    ),
+                  ),
+                  const Text(">", style: TextStyle(fontSize: 16)),
+                ],
+              ),
+              onTap: () => Navigator.pop(context), // no-op; reserved for future
+            ),
+            const Divider(height: 1),
+
+            // Section 2
+            ListTile(
+              leading: Icon(Icons.smart_display, color: dotColor),
+              title: Text(
+                state.frameName,
+                style: const TextStyle(fontWeight: FontWeight.w500),
+              ),
+              trailing: Icon(
+                Icons.circle,
+                color: dotColor,
+                size: 12,
+              ),
+              onTap: () => Navigator.pop(context),
+            ),
+
+            // (Optional) More items later:
+            const SizedBox(height: 8),
+            const Divider(height: 1),
+            const ListTile(
+              leading: Icon(Icons.info_outline),
+              title: Text("About"),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
