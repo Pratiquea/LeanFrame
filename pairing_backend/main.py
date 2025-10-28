@@ -56,26 +56,31 @@ def device_flow_active() -> bool:
     return dev.get("expires_at", 0) > now()
 
 def device_flow_issue():
-    # Request a new device_code
-    data = {
-        "client_id": CLIENT_ID,
-        "scope": SCOPE,
-    }
+    data = {"client_id": CLIENT_ID, "scope": SCOPE}
     r = requests.post(DEVICE_CODE_URL, data=data, timeout=15)
-    r.raise_for_status()
+    if r.status_code != 200:
+        # surface error in STORE so the page can render it
+        try:
+            err = r.json()
+        except Exception:
+            err = {"status_code": r.status_code, "text": r.text}
+        STORE["status"] = "error_device_code"
+        STORE["error"] = err
+        return
     payload = r.json()
     interval = payload.get("interval", 5)
     expires_in = payload["expires_in"]
     STORE["device"] = {
         "device_code": payload["device_code"],
         "user_code": payload["user_code"],
-        "verification_url": payload["verification_url"],   # often https://www.google.com/device
+        "verification_url": payload["verification_url"],
         "interval": interval,
         "issued_at": now(),
         "expires_at": now() + expires_in,
         "last_poll": 0.0,
     }
     STORE["status"] = "pending"
+
 
 def try_poll_token():
     # Respect Google's polling interval
@@ -130,6 +135,11 @@ def pair_page(request: Request):
     dev = STORE.get("device", {})
     user_code = dev.get("user_code")
     verification_url = dev.get("verification_url")
+    if status == "error_device_code":
+        return HTMLResponse(
+            f"<h3>Google device-code request failed.</h3>"
+            f"<pre>{STORE.get('error')}</pre>", status_code=500
+        )
 
     if status == "pending":
         return templates.TemplateResponse(
