@@ -1,8 +1,15 @@
-name: leanframe_uploader
+name: leanframe_app
+description: Client for LeanFrame photo frame
+publish_to: "none"
+
 environment:
-  sdk: '>=3.5.0 <4.0.0'
+  sdk: ">=3.4.0 <4.0.0"
+
 dependencies:
   flutter: { sdk: flutter }
   http: ^1.2.2
-  file_picker: ^10.3.3
-  qr_flutter: ^4.1.0
+  file_picker: ^8.1.2
+  photo_manager: ^3.2.1
+
+flutter:
+  uses-material-design: true

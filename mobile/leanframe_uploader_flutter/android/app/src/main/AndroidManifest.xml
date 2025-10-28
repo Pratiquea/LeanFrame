@@ -3,6 +3,15 @@
 
     <!-- Network for uploads to your frame -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Android 13+ (SDK 33+) granular media permissions -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <!-- Android 14 optional: if the user grants "selected photos only" -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <!-- Back-compat for Android 12 and below -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
 
     <application
         android:label="LeanFrame Uploader"
