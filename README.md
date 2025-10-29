@@ -1,4 +1,6 @@
 # LeanFrame
+[![License: LeanFrame Personal Use](https://img.shields.io/badge/license-Personal--Use-lightgrey.svg)](#license)
+
 
 ### 1) Install
 ```bash
