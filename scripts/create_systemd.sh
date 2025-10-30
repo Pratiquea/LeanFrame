@@ -109,32 +109,6 @@ Unit=leanframe.service
 WantedBy=default.target
 EOF
 
-# ===== System units (QR setup + boot switch) =====
-
-# Setup service: AP + setup FastAPI + onboarding QR screen
-sudo tee /etc/systemd/system/leanframe-setup.service >/dev/null <<EOF
-[Unit]
-Description=LeanFrame first-run setup (AP + QR + setup server)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=${USER_NAME}
-WorkingDirectory=${REPO_DIR}
-Environment=PYTHONUNBUFFERED=1
-ExecStart=/bin/bash -lc '\
-  source ${VENV_BIN}/activate && \
-  python -m photoframe.setup_server & \
-  python -m photoframe.onboarding \
-'
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
 # Boot switch: choose setup vs normal
 sudo tee /etc/systemd/system/leanframe-switch.service >/dev/null <<'EOF'
 [Unit]
@@ -165,28 +139,6 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF
-
-
-# # leanframe-onboard.service
-# cat > "${USER_UNIT_DIR}/leanframe-onboard.service" <<EOF
-# [Unit]
-# Description=LeanFrame first-boot pairing (user)
-# Wants=graphical-session.target network-online.target
-# After=graphical-session.target network-online.target
-
-# [Service]
-# Type=oneshot
-# RemainAfterExit=yes
-# WorkingDirectory=${REPO_DIR}
-# # If your backend runs on the same Pi:
-# Environment=BACKEND_BASE=http://rpi.local:8000
-# Environment=DISPLAY_URL_BASE=http://rpi.local:8000
-# ExecStart=/usr/bin/env bash -lc '${REPO_DIR}/scripts/first_boot_pairing.sh'
-# # Don't spam retries; user may need time to authorize on phone.
-
-# [Install]
-# WantedBy=default.target
-# EOF
 
 # leanframe-sync.service (system service for rclone sync)
 sudo tee /etc/systemd/system/leanframe-sync.service >/dev/null <<EOF
@@ -220,23 +172,33 @@ Unit=leanframe-sync.service
 WantedBy=timers.target
 EOF
 
-# Leanframe-setup.service
+# ===== First-run setup service (AP + QR + setup server) =====
+# This runs the temporary QR/setup HTTP server and the onboarding helper.
+# It uses the venv's python directly (avoid PATH ambiguity).
 sudo tee /etc/systemd/system/leanframe-setup.service >/dev/null <<EOF
 [Unit]
 Description=LeanFrame first-run setup (AP + QR + setup server)
-After=network-online.target
 Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-User=pi
-WorkingDirectory=/home/pi/gits/LeanFrame   
+# Run as the same user who owns the repo & venv:
+User=${USER_NAME}
+WorkingDirectory=${REPO_DIR}
+Environment=PYTHONUNBUFFERED=1
+
+# If your onboarding touches networking that requires root, you should gate those
+# calls via sudoers for just the commands you need. Otherwise keep it unprivileged.
+# Use venv python explicitly (more reliable than 'source ... && python ...'):
 ExecStart=/bin/bash -lc '\
-  source .venv/bin/activate && \
-  python -m photoframe.setup_server & \
-  python -m photoframe.onboarding \
+  set -euo pipefail; \
+  ${VENV_BIN}/python -m photoframe.setup_server & \
+  exec ${VENV_BIN}/python -m photoframe.onboarding \
 '
 Restart=on-failure
+RestartSec=2
 
 [Install]
 WantedBy=multi-user.target
@@ -273,6 +235,7 @@ systemctl --user daemon-reload
 sudo systemctl daemon-reload
 # systemctl --user enable --now leanframe.service
 # systemctl --user enable --now leanframe-wayland.path
+sudo systemctl enable --now leanframe-setup.service || true
 sudo systemctl enable --now leanframe-switch.service
 sudo systemctl enable --now leanframe-sync.timer
 # Warm sync (non-fatal if it fails; check logs with journalctl -u leanframe-sync)
