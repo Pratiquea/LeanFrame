@@ -382,13 +382,11 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final state = InheritedAppState.of(context);
 
-    final Color statusBarColor = state.connected ? Colors.green.shade600 : Colors.grey.shade600;
-    final Color statusBarText = Colors.white;
+    // ✅ compute this BEFORE returning the widget tree
+    final bool needsSetup = state.serverBase == null || !state.connected;
 
     return Scaffold(
-      // 2) Hamburger menu (Drawer)
       drawer: const _AppDrawer(),
-
       appBar: AppBar(
         title: Row(
           mainAxisSize: MainAxisSize.min,
@@ -412,7 +410,6 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         centerTitle: true,
         actions: [
-          // ✅ Keep this little connection dot next to the gear icon
           Icon(
             state.connected ? Icons.circle : Icons.circle_outlined,
             color: state.connected ? Colors.green : Colors.grey,
@@ -442,11 +439,11 @@ class _HomeScreenState extends State<HomeScreen> {
         ],
       ),
 
-
       body: Column(
         children: [
           const SizedBox(height: 8),
-          final needsSetup = state.serverBase == null || !state.connected;
+
+          // ✅ Use collection-if here (no declarations inside the list)
           if (needsSetup)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -486,8 +483,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               },
             ),
-
           ),
+
           const SizedBox(height: 8),
           if (tab == HubTab.photos)
             _PhotosHeaderRow(count: state.imageCount)
@@ -495,16 +492,17 @@ class _HomeScreenState extends State<HomeScreen> {
             const _ActivityPlaceholder(),
           const Divider(height: 1),
           Expanded(
-            child: tab == HubTab.photos ? const _PhotoGrid() : const FrameSettingsTab(),
+            child: tab == HubTab.photos
+                ? const _PhotoGrid()
+                : const FrameSettingsTab(),
           ),
         ],
       ),
 
-      // 1) Wide "Add Photos" bottom button (nearly full width with side padding)
       bottomNavigationBar: SafeArea(
         top: false,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12), // leaves space left & right
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
           child: SizedBox(
             width: double.infinity,
             height: 56,
