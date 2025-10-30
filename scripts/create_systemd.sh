@@ -181,16 +181,23 @@ After=graphical-session.target
 [Service]
 Type=simple
 WorkingDirectory=%h/gits/LeanFrame
+# Env for Wayland sessions
 Environment=PYTHONUNBUFFERED=1
 Environment=SDL_VIDEODRIVER=wayland
-# Wait for the compositor's socket so the window can open
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=%t
+# Wait for the compositor’s socket so the window can open
 ExecStartPre=/bin/sh -lc 'for i in $(seq 1 20); do [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && exit 0; sleep 1; done; echo "wayland-0 not ready"; exit 1'
+# Run onboarding (logs go to journal)
 ExecStart=%h/gits/LeanFrame/.venv/bin/python -m photoframe.onboarding
 Restart=no
+StandardOutput=journal
+StandardError=journal
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 EOF
+systemctl --user enable --now leanframe-onboarding.service
 
 
 # ===== Allow $USER_NAME to restart the switcher without password (sudoers drop-in) =====
