@@ -7,6 +7,7 @@ environment:
 
 dependencies:
   flutter: { sdk: flutter }
+  mobile_scanner: ^6.0.2
   http: ^1.2.2
   file_picker: ^8.1.2
   photo_manager: ^3.2.1

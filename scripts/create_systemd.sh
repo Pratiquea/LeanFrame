@@ -109,26 +109,84 @@ Unit=leanframe.service
 WantedBy=default.target
 EOF
 
-# leanframe-onboard.service
-cat > "${USER_UNIT_DIR}/leanframe-onboard.service" <<EOF
+# ===== System units (QR setup + boot switch) =====
+
+# Setup service: AP + setup FastAPI + onboarding QR screen
+sudo tee /etc/systemd/system/leanframe-setup.service >/dev/null <<EOF
 [Unit]
-Description=LeanFrame first-boot pairing (user)
-Wants=graphical-session.target network-online.target
-After=graphical-session.target network-online.target
+Description=LeanFrame first-run setup (AP + QR + setup server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${USER_NAME}
+WorkingDirectory=${REPO_DIR}
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/bin/bash -lc '\
+  source ${VENV_BIN}/activate && \
+  python -m photoframe.setup_server & \
+  python -m photoframe.onboarding \
+'
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Boot switch: choose setup vs normal
+sudo tee /etc/systemd/system/leanframe-switch.service >/dev/null <<'EOF'
+[Unit]
+Description=LeanFrame boot switch (setup vs normal)
+After=network.target
 
 [Service]
 Type=oneshot
+ExecStart=/bin/bash -lc '\
+  STATE="/var/lib/leanframe/state.json"; \
+  if [ -f "$STATE" ] && grep -q "\"provisioned\": true" "$STATE"; then \
+    # Provisioned: stop setup, enable & start user wayland path (which starts leanframe.service). \
+    systemctl stop leanframe-setup.service || true; \
+    systemctl disable leanframe-setup.service || true; \
+    loginctl enable-linger "${USER}"; \
+    runuser -l "${USER}" -c "systemctl --user daemon-reload"; \
+    runuser -l "${USER}" -c "systemctl --user enable leanframe-wayland.path"; \
+    runuser -l "${USER}" -c "systemctl --user start  leanframe-wayland.path"; \
+  else \
+    # Not provisioned: disable user units and start setup. \
+    runuser -l "${USER}" -c "systemctl --user stop  leanframe-wayland.path" || true; \
+    runuser -l "${USER}" -c "systemctl --user disable leanframe-wayland.path" || true; \
+    systemctl enable leanframe-setup.service; \
+    systemctl start  leanframe-setup.service; \
+  fi'
 RemainAfterExit=yes
-WorkingDirectory=${REPO_DIR}
-# If your backend runs on the same Pi:
-Environment=BACKEND_BASE=http://rpi.local:8000
-Environment=DISPLAY_URL_BASE=http://rpi.local:8000
-ExecStart=/usr/bin/env bash -lc '${REPO_DIR}/scripts/first_boot_pairing.sh'
-# Don't spam retries; user may need time to authorize on phone.
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
 EOF
+
+
+# # leanframe-onboard.service
+# cat > "${USER_UNIT_DIR}/leanframe-onboard.service" <<EOF
+# [Unit]
+# Description=LeanFrame first-boot pairing (user)
+# Wants=graphical-session.target network-online.target
+# After=graphical-session.target network-online.target
+
+# [Service]
+# Type=oneshot
+# RemainAfterExit=yes
+# WorkingDirectory=${REPO_DIR}
+# # If your backend runs on the same Pi:
+# Environment=BACKEND_BASE=http://rpi.local:8000
+# Environment=DISPLAY_URL_BASE=http://rpi.local:8000
+# ExecStart=/usr/bin/env bash -lc '${REPO_DIR}/scripts/first_boot_pairing.sh'
+# # Don't spam retries; user may need time to authorize on phone.
+
+# [Install]
+# WantedBy=default.target
+# EOF
 
 # leanframe-sync.service (system service for rclone sync)
 sudo tee /etc/systemd/system/leanframe-sync.service >/dev/null <<EOF
@@ -162,6 +220,42 @@ Unit=leanframe-sync.service
 WantedBy=timers.target
 EOF
 
+# Leanframe-setup.service
+sudo tee /etc/systemd/system/leanframe-setup.service >/dev/null <<EOF
+[Unit]
+Description=LeanFrame first-run setup (AP + QR + setup server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/gits/LeanFrame   
+ExecStart=/bin/bash -lc '\
+  source .venv/bin/activate && \
+  python -m photoframe.setup_server & \
+  python -m photoframe.onboarding \
+'
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# ===== Allow $USER_NAME to restart the switcher without password (sudoers drop-in) =====
+# This enables the FastAPI /provision endpoint to run:
+#   sudo systemctl restart leanframe-switch.service
+# so the device flips from setup mode to runtime immediately (no reboot).
+SUDOERS_DROPIN="/etc/sudoers.d/leanframe-switch"
+sudo tee "${SUDOERS_DROPIN}" >/dev/null <<EOF
+# LeanFrame: allow ${USER_NAME} to flip services after QR provisioning
+# Only these exact commands are allowed, nothing else:
+${USER_NAME} ALL=(ALL) NOPASSWD: /bin/systemctl restart leanframe-switch.service, /usr/bin/systemctl restart leanframe-switch.service
+EOF
+sudo chmod 440 "${SUDOERS_DROPIN}"
+# Validate syntax; if invalid, visudo returns non-zero and the script (set -e) will exit.
+sudo visudo -cf "${SUDOERS_DROPIN}"
+echo "Created sudoers drop-in at ${SUDOERS_DROPIN} (validated)."
 
 # ===== Make the user manager survive boot (do once) =====
 sudo loginctl enable-linger "${USER_NAME}"
@@ -175,9 +269,11 @@ fi
 
 # ===== Enable & start user units =====
 systemctl --user daemon-reload
-systemctl --user enable --now leanframe.service
-systemctl --user enable --now leanframe-wayland.path
-systemctl --user enable --now leanframe-onboard.service
+# NOT enabling user leanframe units now; the switcher will do it post-provision.
+sudo systemctl daemon-reload
+# systemctl --user enable --now leanframe.service
+# systemctl --user enable --now leanframe-wayland.path
+sudo systemctl enable --now leanframe-switch.service
 sudo systemctl enable --now leanframe-sync.timer
 # Warm sync (non-fatal if it fails; check logs with journalctl -u leanframe-sync)
 sudo systemctl start leanframe-sync.service || true
@@ -185,26 +281,19 @@ sudo systemctl start leanframe-sync.service || true
 
 
 echo "-------------------------------------------------------------"
-echo "Installed user units:"
+echo "User units (created but not enabled yet):"
 echo "  ${USER_UNIT_DIR}/leanframe.service"
 echo "  ${USER_UNIT_DIR}/leanframe-wayland.path"
-echo "  ${USER_UNIT_DIR}/leanframe-onboard.service"
-echo "Installed system units:"
+echo "System units:"
+echo "  /etc/systemd/system/leanframe-setup.service"
+echo "  /etc/systemd/system/leanframe-switch.service"
 echo "  /etc/systemd/system/leanframe-sync.service"
 echo "  /etc/systemd/system/leanframe-sync.timer"
 echo
-echo "Global env: /etc/leanframe.env"
-echo "  PHOTO_DIR=${PHOTO_DIR}"
-echo "  RCLONE_REMOTE=${RCLONE_REMOTE}"
-echo "  DRIVE_PATH=\"${DRIVE_PATH}\""
-echo "  RCLONE_CLIENT_ID=${RCLONE_CLIENT_ID:-<empty>}"
-echo "  RCLONE_CLIENT_SECRET=${RCLONE_CLIENT_SECRET:+<set>}"
+echo "Boot switch status:"
+echo "  sudo systemctl status leanframe-switch.service"
 echo
-echo "User-service logs (no sudo):"
-echo "  journalctl --user -u leanframe -f"
-echo "  journalctl --user -u leanframe-onboard -f"
-echo "  journalctl --user -u leanframe-backend -f   (if you use it)"
-echo
-echo "System timer:"
-echo "  sudo systemctl status leanframe-sync.timer"
+echo "First boot (not provisioned): setup service runs."
+echo "After provisioning (provisioned=true):"
+echo "  switcher stops setup and enables user leanframe-wayland.path -> leanframe.service"
 echo "-------------------------------------------------------------"

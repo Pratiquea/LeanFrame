@@ -5,7 +5,7 @@
 ### 1) Install
 ```bash
 sudo apt-get update
-sudo apt-get install -y git python3-venv ffmpeg mpv libvips jq qrencode
+sudo apt-get install -y git python3-venv ffmpeg mpv libvips jq qrencode hostapd dnsmasq avahi-daemon network-manager
 git clone <this-repo> && cd LeanFrame
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
@@ -67,3 +67,13 @@ ad (PWA) so the mobile app becomes optional.
 - WebSocket push updates when new media arrives; hot‑reload playlist.
 - Blurhash/LQIP preload for snappier fades.
 - On‑device HEIC→JPEG conversion via libheif if needed.
+
+
+## Systemd service
+### User serivces
+  * leanframe-wayland.path
+  * leanframe.service
+  * leanframe-onboard.service
+### System services
+  * leanframe-sync.service
+  * leanframe-sync.timer

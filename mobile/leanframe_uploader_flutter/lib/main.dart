@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 
 void main() => runApp(const LeanFrameApp());
 
@@ -151,6 +152,191 @@ extension ApiRuntime on Api {
   }
 }
 
+/// ----------------------------------------------------------------------------
+/// First-run wizard
+/// ----------------------------------------------------------------------------
+class FirstRunWizard extends StatefulWidget {
+  const FirstRunWizard({super.key});
+  @override
+  State<FirstRunWizard> createState() => _FirstRunWizardState();
+}
+
+class _FirstRunWizardState extends State<FirstRunWizard> {
+  int step = 0;
+  PairPayload? payload;
+  final ssidCtrl = TextEditingController();
+  final passCtrl = TextEditingController();
+  bool posting = false;
+  String? error;
+
+  @override
+  void dispose() { ssidCtrl.dispose(); passCtrl.dispose(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) {
+    final steps = [
+      _stepWelcome(),
+      _stepScanQR(),
+      _stepConnectAP(),
+      _stepEnterHomeWifi(),
+      _stepDone(),
+    ];
+    return Scaffold(
+      appBar: AppBar(title: const Text("Set up your frame")),
+      body: steps[step],
+    );
+  }
+
+  Widget _stepWelcome() {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text("Welcome", style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        const Text("Plug in your LeanFrame. When the QR appears, continue."),
+        const Spacer(),
+        Row(children: [
+          const Spacer(),
+          FilledButton(onPressed: () => setState(() => step = 1), child: const Text("Continue")),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _stepScanQR() {
+    return Column(children: [
+      const SizedBox(height: 8),
+      const Text("Scan the QR on your frame"),
+      const SizedBox(height: 12),
+      Expanded(
+        child: MobileScanner(
+          onDetect: (capture) {
+            final b = capture.barcodes.firstOrNull;
+            if (b == null) return;
+            try {
+              final j = json.decode(b.rawValue!);
+              final p = PairPayload.fromJson(j);
+              setState(() { payload = p; step = 2; });
+            } catch (e) {
+              setState(() => error = "Invalid QR: $e");
+            }
+          },
+        ),
+      ),
+      if (error != null) Padding(
+        padding: const EdgeInsets.all(12), child: Text(error!, style: const TextStyle(color: Colors.red))),
+      const SizedBox(height: 8),
+    ]);
+  }
+
+  Widget _stepConnectAP() {
+    final p = payload!;
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text("Connect to setup Wi-Fi", style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 6),
+        Text("Join this temporary Wi-Fi network:\n\nSSID: ${p.ssid}\nPassword: ${p.psk}"),
+        const SizedBox(height: 12),
+        const Text("After connecting, return to this app."),
+        const Spacer(),
+        Row(children: [
+          TextButton(onPressed: () => setState(() => step = 1), child: const Text("Back")),
+          const Spacer(),
+          FilledButton(onPressed: () => setState(() => step = 3), child: const Text("I’m connected")),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _stepEnterHomeWifi() {
+    final p = payload!;
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text("Your home Wi-Fi", style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 6),
+        TextField(controller: ssidCtrl, decoration: const InputDecoration(labelText: "Home Wi-Fi SSID")),
+        const SizedBox(height: 8),
+        TextField(controller: passCtrl, decoration: const InputDecoration(labelText: "Password"), obscureText: true),
+        const SizedBox(height: 12),
+        if (error != null) Text(error!, style: const TextStyle(color: Colors.red)),
+        const Spacer(),
+        Row(children: [
+          TextButton(onPressed: () => setState(() => step = 2), child: const Text("Back")),
+          const Spacer(),
+          FilledButton.icon(
+            onPressed: posting ? null : () async {
+              setState(() { posting = true; error = null; });
+              try {
+                final res = await http.post(
+                  Uri.parse("${p.setupBase}/provision"),
+                  headers: {"Content-Type":"application/json"},
+                  body: json.encode({
+                    "pair_code": p.pairCode,
+                    "wifi": {"ssid": ssidCtrl.text.trim(), "password": passCtrl.text.trim()},
+                  }),
+                );
+                if (res.statusCode == 200) {
+                  setState(() => step = 4);
+                } else {
+                  setState(() => error = "Provision failed: ${res.statusCode} ${res.body}");
+                }
+              } catch (e) {
+                setState(() => error = "Network error: $e");
+              } finally {
+                setState(() => posting = false);
+              }
+            },
+            icon: posting ? const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2)) : const Icon(Icons.check),
+            label: const Text("Connect"),
+          ),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _stepDone() {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Text("All set!", style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 8),
+        const Text("Your frame is joining your home Wi-Fi. Reconnect your phone to your normal Wi-Fi."),
+        const SizedBox(height: 8),
+        const Text("Then open Home → Settings (gear) and press Connect."),
+        const Spacer(),
+        Row(children: [
+          const Spacer(),
+          FilledButton(onPressed: () => Navigator.pop(context), child: const Text("Finish")),
+        ]),
+      ]),
+    );
+  }
+}
+
+extension<T> on List<T> {
+  T? get firstOrNull => isEmpty ? null : first;
+}
+
+
+/// ----------------------------------------------------------------------------
+/// QR code payload for initial setup
+/// ----------------------------------------------------------------------------
+class PairPayload {
+  final String ssid, psk, pairCode, deviceId, setupBase;
+  PairPayload(this.ssid, this.psk, this.pairCode, this.deviceId, this.setupBase);
+  factory PairPayload.fromJson(Map<String,dynamic> j) {
+    final kind = j["kind"] ?? "leanframe_setup_v1";
+    if (kind != "leanframe_setup_v1") {
+      throw Exception("Unsupported QR kind");
+    }
+    return PairPayload(
+      j["ap_ssid"], j["ap_psk"], j["pair_code"], j["device_id"], j["setup_base"]
+    );
+  }
+}
+
 
 /// ----------------------------------------------------------------------------
 /// App root
@@ -260,6 +446,26 @@ class _HomeScreenState extends State<HomeScreen> {
       body: Column(
         children: [
           const SizedBox(height: 8),
+          final needsSetup = state.serverBase == null || !state.connected;
+          if (needsSetup)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Card(
+                color: Colors.amber.shade100,
+                child: ListTile(
+                  leading: const Icon(Icons.qr_code_2),
+                  title: const Text("Set up your new frame"),
+                  subtitle: const Text("Scan QR, join setup Wi-Fi, and provision"),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(builder: (_) => const FirstRunWizard()),
+                    );
+                  },
+                ),
+              ),
+            ),
+
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12),
             child: CupertinoSegmentedControl<HubTab>(
