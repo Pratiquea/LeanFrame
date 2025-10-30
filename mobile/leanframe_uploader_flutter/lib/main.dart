@@ -6,6 +6,7 @@ import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 
 void main() => runApp(const LeanFrameApp());
 
@@ -81,6 +82,76 @@ class Api {
   }
 }
 
+class RuntimeConfig {
+  // Render
+  String mode;           // "cover" | "contain"
+  String paddingStyle;   // "blur" | "solid"
+  String paddingColor;   // "#RRGGBB"
+  double blurAmount;     // e.g., 16.0 (used when style == "blur")
+
+  // Playback
+  double slideDurationS; // better name for default_image_seconds
+  bool shuffle;
+  bool loop;
+  int crossfadeMs;       // better name for transition_crossfade_ms
+
+  RuntimeConfig({
+    required this.mode,
+    required this.paddingStyle,
+    required this.paddingColor,
+    required this.blurAmount,
+    required this.slideDurationS,
+    required this.shuffle,
+    required this.loop,
+    required this.crossfadeMs,
+  });
+
+  factory RuntimeConfig.fromJson(Map<String,dynamic> j) => RuntimeConfig(
+    mode: j["render"]["mode"],
+    paddingStyle: j["render"]["padding"]["style"],
+    paddingColor: j["render"]["padding"]["color"],
+    blurAmount: (j["render"]["padding"]["blur_amount"] ?? 16).toDouble(),
+    slideDurationS: (j["playback"]["slide_duration_s"]).toDouble(),
+    shuffle: j["playback"]["shuffle"] == true,
+    loop: j["playback"]["loop"] == true,
+    crossfadeMs: j["playback"]["crossfade_ms"],
+  );
+
+  Map<String,dynamic> toJson() => {
+    "render": {
+      "mode": mode,
+      "padding": {
+        "style": paddingStyle,
+        "color": paddingColor,
+        "blur_amount": blurAmount,
+      }
+    },
+    "playback": {
+      "slide_duration_s": slideDurationS,
+      "shuffle": shuffle,
+      "loop": loop,
+      "crossfade_ms": crossfadeMs,
+    }
+  };
+}
+
+extension ApiRuntime on Api {
+  Future<RuntimeConfig> getRuntime() async {
+    final res = await http.get(Uri.parse("$base/config/runtime"), headers: _headers);
+    if (res.statusCode != 200) { throw Exception("get runtime ${res.statusCode}"); }
+    return RuntimeConfig.fromJson(json.decode(res.body));
+  }
+  Future<bool> putRuntime(RuntimeConfig cfg) async {
+    final res = await http.put(
+      Uri.parse("$base/config/runtime"),
+      headers: {..._headers, "Content-Type": "application/json"},
+      body: json.encode(cfg.toJson()),
+    );
+    return res.statusCode == 200;
+  }
+}
+
+
 /// ----------------------------------------------------------------------------
 /// App root
 /// ----------------------------------------------------------------------------
@@ -116,7 +187,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-enum HubTab { activity, photos }
+enum HubTab { photos, settings}
 
 class _HomeScreenState extends State<HomeScreen> {
   HubTab tab = HubTab.photos;
@@ -167,7 +238,7 @@ class _HomeScreenState extends State<HomeScreen> {
               final out = await showDialog<_ServerCfg>(
                 context: context,
                 builder: (_) => _ServerConfigDialog(
-                  initialBase: state.serverBase ?? "http://192.168.1.100:8765",
+                  initialBase: state.serverBase ?? "http://192.168.1.104:8765",
                   initialToken: state.authToken,
                 ),
               );
@@ -201,9 +272,11 @@ class _HomeScreenState extends State<HomeScreen> {
                     Icon(Icons.grid_on, size: 16), SizedBox(width: 6), Text("Photos")
                   ]),
                 ),
-                HubTab.activity: Padding(
+                HubTab.settings: Padding(
                   padding: EdgeInsets.all(8),
-                  child: Text("Activity"),
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.settings, size: 16), SizedBox(width: 6), Text("Settings")
+                  ]),
                 ),
               },
             ),
@@ -216,7 +289,7 @@ class _HomeScreenState extends State<HomeScreen> {
             const _ActivityPlaceholder(),
           const Divider(height: 1),
           Expanded(
-            child: tab == HubTab.photos ? const _PhotoGrid() : const _ActivityCenter(),
+            child: tab == HubTab.photos ? const _PhotoGrid() : const FrameSettingsTab(),
           ),
         ],
       ),
@@ -422,6 +495,406 @@ class _PhotoGrid extends StatelessWidget {
     );
   }
 }
+
+class FrameSettingsTab extends StatefulWidget {
+  const FrameSettingsTab({super.key});
+  @override
+  State<FrameSettingsTab> createState() => _FrameSettingsTabState();
+}
+
+class _FrameSettingsTabState extends State<FrameSettingsTab> {
+  RuntimeConfig? cfg;
+  bool saving = false;
+  String? error;
+
+  // temp UI state bindings
+  late String _mode;
+  late String _style;
+  late String _colorHex;
+  double _blur = 16;
+  double _slideS = 12;
+  bool _shuffle = false;
+  bool _loop = true;
+  int _crossfadeMs = 300;
+  bool _loadedOnce = false; 
+
+  static const _allStyles = <String>[
+    "solid",
+    "blur",
+    "average",
+    "mirror",
+    "stretch",
+    "gradient_linear",
+    "gradient_radial",
+    "glass",
+    "motion",
+    "texture",
+    "dim",
+  ];
+
+  // Helpers for conditional controls
+  bool get _usesBlur => _style == "blur" || _style == "glass";
+  bool get _styleUsesColor => _style == "solid" || _style == "gradient_linear" || _style == "gradient_radial";
+
+  String _labelForStyle(String s) {
+    switch (s) {
+      case "solid": return "Solid color";
+      case "blur": return "Blur";
+      case "average": return "Average color";
+      case "mirror": return "Mirror pad";
+      case "stretch": return "Stretch edges";
+      case "gradient_linear": return "Gradient (linear)";
+      case "gradient_radial": return "Gradient (radial)";
+      case "glass": return "Glass (blurred tint)";
+      case "motion": return "Motion smear";
+      case "texture": return "Texture (grain)";
+      case "dim": return "Dimmed avg";
+      default: return s;
+    }
+  }
+
+  @override
+  void initState() { super.initState(); }
+
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_loadedOnce) {
+      _loadedOnce = true;
+      // Safe: runs after the element is mounted so Inherited lookups work
+      _load();
+    }
+  }
+
+
+  Future<void> _load() async {
+    final state = InheritedAppState.of(context);
+    if (state.serverBase == null) { setState(() => error = "Set Server URL/Token in settings."); return; }
+    try {
+      final api = Api(state.serverBase!, state.authToken);
+      final r = await api.getRuntime();
+      setState(() {
+        cfg = r;
+        _mode = r.mode;
+        _style = r.paddingStyle;
+        _colorHex = r.paddingColor;
+        _blur = r.blurAmount;
+        _slideS = r.slideDurationS;
+        _shuffle = r.shuffle;
+        _loop = r.loop;
+        _crossfadeMs = r.crossfadeMs;
+      });
+    } catch (e) {
+      setState(() => error = "Failed to load: $e");
+    }
+  }
+
+  Future<void> _save() async {
+    final state = InheritedAppState.of(context);
+    if (state.serverBase == null) return;
+    setState(() { saving = true; error = null; });
+    try {
+      final api = Api(state.serverBase!, state.authToken);
+      final ok = await api.putRuntime(RuntimeConfig(
+        mode: _mode,
+        paddingStyle: _style,         // includes "glass"
+        paddingColor: _colorHex,      // only used when "solid"
+        blurAmount: _usesBlur ? _blur : 0.0,
+        slideDurationS: _slideS,
+        shuffle: _shuffle,
+        loop: _loop,
+        crossfadeMs: _crossfadeMs,
+      ));
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(ok ? "Saved" : "Save failed")),
+      );
+      if (!ok) setState(() => error = "Save failed");
+    } catch (e) {
+      setState(() => error = "Save error: $e");
+    } finally {
+      if (mounted) setState(() => saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (error != null) {
+      final app = InheritedAppState.of(context);
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              error!,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.settings),
+              label: const Text("Open server settings"),
+              onPressed: () async {
+                final out = await showDialog<_ServerCfg>(
+                  context: context,
+                  builder: (_) => _ServerConfigDialog(
+                    initialBase: app.serverBase ?? "http://192.168.1.104:8765",
+                    initialToken: app.authToken,
+                  ),
+                );
+                if (out != null) {
+                  app.setServer(base: out.base, token: out.token);
+                  final up = await Api(out.base, out.token).ping();
+                  app.setConnection(up);
+                  if (!mounted) return;
+                  if (up) {
+                    setState(() {
+                      error = null;  // clear the error so UI can load
+                      cfg = null;    // force spinner then reload
+                    });
+                    _load();         // fetch /config/runtime
+                  } else {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text("Server not reachable")),
+                    );
+                  }
+                }
+              },
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (cfg == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 100),
+      children: [
+        Text("Render", style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+
+        // 1.1 Mode: cover / contain
+        Row(children: [
+          const SizedBox(width: 140, child: Text("Fit mode")),
+          const SizedBox(width: 12),
+          DropdownButton<String>(
+            value: _mode,
+            items: const [
+              DropdownMenuItem(value: "cover", child: Text("Cover")),
+              DropdownMenuItem(value: "contain", child: Text("Contain")),
+            ],
+            onChanged: (v) => setState(() => _mode = v!),
+          ),
+        ]),
+        const SizedBox(height: 8),
+
+        // 1.2/1.3 Padding style + 1.4 Color (if solid) + 1.5 Blur (if blur)
+        Row(children: [
+          const SizedBox(width: 140, child: Text("Padding style")),
+          const SizedBox(width: 12),
+          DropdownButton<String>(
+            value: _style,
+            items: _allStyles
+                .map((s) => DropdownMenuItem(value: s, child: Text(_labelForStyle(s))))
+                .toList(),
+            onChanged: (v) => setState(() => _style = v!),
+          ),
+        ]),
+        const SizedBox(height: 8),
+
+        // if (_style == "solid")
+        //   Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+        //     const SizedBox(width: 140, child: Text("Color")),
+        //     const SizedBox(width: 12),
+        //     GestureDetector(
+        //       onTap: () async {
+        //         Color current = _parseHex(_colorHex);
+        //         final picked = await showDialog<Color>(
+        //           context: context,
+        //           builder: (_) => AlertDialog(
+        //             title: const Text("Pick color"),
+        //             content: SingleChildScrollView(child: BlockPicker(
+        //               pickerColor: current,
+        //               onColorChanged: (c) => current = c,
+        //             )),
+        //             actions: [
+        //               TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
+        //               FilledButton(onPressed: () => Navigator.pop(context, current), child: const Text("Select")),
+        //             ],
+        //           ),
+        //         );
+        //         if (picked != null) setState(() => _colorHex = _toHex(picked));
+        //       },
+        //       child: Container(
+        //         width: 48, height: 28, decoration: BoxDecoration(
+        //           color: _parseHex(_colorHex),
+        //           borderRadius: BorderRadius.circular(6),
+        //           border: Border.all(color: Colors.black12),
+        //         ),
+        //       ),
+        //     ),
+        //     const SizedBox(width: 12),
+        //     Expanded(child: Text(_colorHex)),
+        //   ]),
+
+        if (_styleUsesColor)
+          Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+            const SizedBox(width: 140, child: Text("Color")),
+            const SizedBox(width: 12),
+            GestureDetector(
+              onTap: () async {
+                Color current = _parseHex(_colorHex);
+                final picked = await showDialog<Color>(
+                  context: context,
+                  builder: (_) => AlertDialog(
+                    title: const Text("Pick color"),
+                    content: SingleChildScrollView(
+                      child: BlockPicker(
+                        pickerColor: current,
+                        onColorChanged: (c) => current = c,
+                      ),
+                    ),
+                    actions: [
+                      TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
+                      FilledButton(onPressed: () => Navigator.pop(context, current), child: const Text("Select")),
+                    ],
+                  ),
+                );
+                if (picked != null) setState(() => _colorHex = _toHex(picked));
+              },
+              child: Container(
+                width: 48, height: 28,
+                decoration: BoxDecoration(
+                  color: _parseHex(_colorHex),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: Colors.black12),
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(child: Text(_colorHex)),
+          ]),
+
+        if (_usesBlur)
+          Row(children: [
+            const SizedBox(width: 140, child: Text("Blur amount")),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Slider(
+                min: 0, max: 64, divisions: 64,
+                value: _blur,
+                label: _blur.toStringAsFixed(0),
+                onChanged: (v) => setState(() => _blur = v),
+              ),
+            ),
+            SizedBox(
+              width: 70,
+              child: TextField(
+                controller: TextEditingController(text: _blur.toStringAsFixed(0)),
+                keyboardType: TextInputType.number,
+                onSubmitted: (s) {
+                  final v = double.tryParse(s) ?? _blur;
+                  setState(() => _blur = v.clamp(0, 64));
+                },
+              ),
+            ),
+          ]),
+
+        const SizedBox(height: 24),
+        Text("Playback", style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 8),
+
+        // 2.1 Slide duration (seconds)
+        Row(children: [
+          const SizedBox(width: 140, child: Text("Slide duration (s)")),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Slider(
+              min: 1, max: 120, divisions: 119,
+              value: _slideS,
+              label: _slideS.toStringAsFixed(0),
+              onChanged: (v) => setState(() => _slideS = v),
+            ),
+          ),
+          SizedBox(
+            width: 70,
+            child: TextField(
+              controller: TextEditingController(text: _slideS.toStringAsFixed(0)),
+              keyboardType: TextInputType.number,
+              onSubmitted: (s) {
+                final v = double.tryParse(s) ?? _slideS;
+                setState(() => _slideS = v.clamp(1, 120));
+              },
+            ),
+          ),
+        ]),
+
+        const SizedBox(height: 8),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text("Shuffle"),
+          value: _shuffle,
+          onChanged: (v) => setState(() => _shuffle = v),
+        ),
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text("Loop"),
+          value: _loop,
+          onChanged: (v) => setState(() => _loop = v),
+        ),
+
+        const SizedBox(height: 8),
+        Row(children: [
+          const SizedBox(width: 140, child: Text("Crossfade (ms)")),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Slider(
+              min: 0, max: 3000, divisions: 60,
+              value: _crossfadeMs.toDouble(),
+              label: _crossfadeMs.toString(),
+              onChanged: (v) => setState(() => _crossfadeMs = v.round()),
+            ),
+          ),
+          SizedBox(
+            width: 90,
+            child: TextField(
+              controller: TextEditingController(text: _crossfadeMs.toString()),
+              keyboardType: TextInputType.number,
+              onSubmitted: (s) {
+                final v = int.tryParse(s) ?? _crossfadeMs;
+                setState(() => _crossfadeMs = v.clamp(0, 10000));
+              },
+            ),
+          ),
+        ]),
+
+        const SizedBox(height: 16),
+        FilledButton.icon(
+          onPressed: saving ? null : _save,
+          icon: saving ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.save),
+          label: const Text("Save"),
+        ),
+      ],
+    );
+  }
+
+  // helpers
+  Color _parseHex(String hex) {
+    final h = hex.replaceAll("#", "");
+    final v = int.parse(h, radix: 16);
+    return Color(0xFF000000 | v);
+  }
+  String _toHex(Color c) {
+    final argb = c.toARGB32();          // 0xAARRGGBB
+    final rgb  = argb & 0x00FFFFFF;     // strip alpha
+    return "#${rgb.toRadixString(16).padLeft(6, '0').toUpperCase()}";
+  }
+}
+
 
 /// ----------------------------------------------------------------------------
 /// Selection editor (for already-uploaded grid items; optional stub)

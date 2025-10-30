@@ -10,6 +10,8 @@ dependencies:
   http: ^1.2.2
   file_picker: ^8.1.2
   photo_manager: ^3.2.1
+  # color picker
+  flutter_colorpicker: ^1.1.0
 
 flutter:
   uses-material-design: true
