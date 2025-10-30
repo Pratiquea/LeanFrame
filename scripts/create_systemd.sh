@@ -172,38 +172,7 @@ Unit=leanframe-sync.service
 WantedBy=timers.target
 EOF
 
-# ===== First-run setup service (AP + QR + setup server) =====
-# This runs the temporary QR/setup HTTP server and the onboarding helper.
-# It uses the venv's python directly (avoid PATH ambiguity).
-# sudo tee /etc/systemd/system/leanframe-setup.service >/dev/null <<EOF
-# [Unit]
-# Description=LeanFrame first-run setup (AP + QR + setup server)
-# Wants=network-online.target
-# After=network-online.target
-# StartLimitIntervalSec=0
-
-# [Service]
-# Type=simple
-# # Run as the same user who owns the repo & venv:
-# User=${USER_NAME}
-# WorkingDirectory=${REPO_DIR}
-# Environment=PYTHONUNBUFFERED=1
-
-# # If your onboarding touches networking that requires root, you should gate those
-# # calls via sudoers for just the commands you need. Otherwise keep it unprivileged.
-# # Use venv python explicitly (more reliable than 'source ... && python ...'):
-# ExecStart=/bin/bash -lc '\
-#   set -euo pipefail; \
-#   ${VENV_BIN}/python -m photoframe.setup_server & \
-#   exec ${VENV_BIN}/python -m photoframe.onboarding \
-# '
-# Restart=on-failure
-# RestartSec=2
-
-# [Install]
-# WantedBy=multi-user.target
-# EOF
-cat > "${USER_UNIT_DIR}/leanframe-onboarding.service" <<EOF
+cat > "${USER_UNIT_DIR}/leanframe-onboarding.service" <<'EOF'
 [Unit]
 Description=LeanFrame onboarding QR (user session)
 Wants=graphical-session.target
@@ -214,7 +183,7 @@ Type=simple
 WorkingDirectory=%h/gits/LeanFrame
 Environment=PYTHONUNBUFFERED=1
 Environment=SDL_VIDEODRIVER=wayland
-# Wait for the compositor’s socket so the window can open
+# Wait for the compositor's socket so the window can open
 ExecStartPre=/bin/sh -lc 'for i in $(seq 1 20); do [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && exit 0; sleep 1; done; echo "wayland-0 not ready"; exit 1'
 ExecStart=%h/gits/LeanFrame/.venv/bin/python -m photoframe.onboarding
 Restart=no
@@ -222,6 +191,7 @@ Restart=no
 [Install]
 WantedBy=default.target
 EOF
+
 
 # ===== Allow $USER_NAME to restart the switcher without password (sudoers drop-in) =====
 # This enables the FastAPI /provision endpoint to run:
