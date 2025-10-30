@@ -7,6 +7,7 @@ from .indexer import Library
 from .config import AppCfg
 from .constants import SUPPORTED_IMAGES, SUPPORTED_VIDEOS
 from .fast_image_loader import FastImageLoader
+from .server import runtime_bus
 
 
 class Viewer:
@@ -27,6 +28,42 @@ class Viewer:
         if not self.current_id:
             rows = self.lib.list_ids()
             self.current_id = rows[0][0] if rows else None
+        # dynamic reconfigure: subscribe once
+        runtime_bus.subscribe(self._on_runtime_update)
+
+    def _on_runtime_update(self, data: dict) -> None:
+        """
+        Apply runtime config updates pushed by the API (no restart).
+        """
+        try:
+            r = data.get("render", {})
+            p = (r.get("padding") or {})
+            # Render
+            self.cfg.render.mode = r.get("mode", self.cfg.render.mode)
+            if hasattr(self.cfg.render, "padding") and self.cfg.render.padding:
+                self.cfg.render.padding.style = p.get("style", self.cfg.render.padding.style)
+                if "color" in p:
+                    self.cfg.render.padding.color = p["color"]
+                if "blur_amount" in p and hasattr(self.cfg.render.padding, "blur_amount"):
+                    self.cfg.render.padding.blur_amount = p["blur_amount"]
+
+            # Playback
+            pb = data.get("playback", {})
+            if "slide_duration_s" in pb:
+                self.cfg.playback.default_image_seconds = float(pb["slide_duration_s"])
+            if "shuffle" in pb:
+                self.cfg.playback.shuffle = bool(pb["shuffle"])
+            if "loop" in pb:
+                self.cfg.playback.loop = bool(pb["loop"])
+            if "crossfade_ms" in pb:
+                # you use crossfade only if transitions_crossfade is True
+                self.cfg.playback.transition_crossfade_ms = int(pb["crossfade_ms"])
+                self.crossfade_ms = int(pb["crossfade_ms"]) if getattr(self.cfg.playback, "transitions_crossfade", False) else 0
+
+            # If you cache anything else (e.g., timers), refresh here if needed.
+        except Exception:
+            pass
+
 
     def _load_resume_id(self):
         try:

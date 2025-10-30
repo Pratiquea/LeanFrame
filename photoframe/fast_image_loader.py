@@ -399,9 +399,10 @@ class FastImageLoader:
             raise FileNotFoundError(f"Missing media: {p}")
         # Cache key must reflect render settings too
         key = (p, self.W, self.H, mtime,
-               getattr(self.render, "mode", "cover"),
-               getattr(self.render.padding, "style", "blur") if self.render and self.render.padding else "blur",
-               getattr(self.render.padding, "color", "#000000") if self.render and self.render.padding else "#000000")
+                getattr(self.render, "mode", "cover"),
+                getattr(self.render.padding, "style", "blur") if self.render and self.render.padding else "blur",
+                getattr(self.render.padding, "color", "#000000") if self.render and self.render.padding else "#000000",
+                int(getattr(self.render.padding, "blur_amount", 28)) if self.render and self.render.padding else 28)
         def mk():
             # Decode (fast-paths if available)
             orientation_tag = 1
