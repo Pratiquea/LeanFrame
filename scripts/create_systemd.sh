@@ -203,7 +203,7 @@ EOF
 # [Install]
 # WantedBy=multi-user.target
 # EOF
-sudo tee /etc/systemd/system/leanframe-onboarding.service >/dev/null <<EOF
+cat > "${USER_UNIT_DIR}/leanframe-onboarding.service" <<EOF
 [Unit]
 Description=LeanFrame onboarding QR (user session)
 Wants=graphical-session.target
@@ -254,6 +254,7 @@ systemctl --user daemon-reload
 sudo systemctl daemon-reload
 # systemctl --user enable --now leanframe.service
 # systemctl --user enable --now leanframe-wayland.path
+systemctl --user enable --now leanframe-onboarding.service
 # sudo systemctl enable --now leanframe-setup.service || true
 sudo systemctl enable --now leanframe-switch.service
 sudo systemctl enable --now leanframe-sync.timer
