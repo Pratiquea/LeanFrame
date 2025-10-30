@@ -254,7 +254,7 @@ systemctl --user daemon-reload
 sudo systemctl daemon-reload
 # systemctl --user enable --now leanframe.service
 # systemctl --user enable --now leanframe-wayland.path
-sudo systemctl enable --now leanframe-setup.service || true
+# sudo systemctl enable --now leanframe-setup.service || true
 sudo systemctl enable --now leanframe-switch.service
 sudo systemctl enable --now leanframe-sync.timer
 # Warm sync (non-fatal if it fails; check logs with journalctl -u leanframe-sync)
