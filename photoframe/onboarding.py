@@ -2,7 +2,6 @@
 import os, json, time, socket, uuid
 from pathlib import Path
 import sys
-
 import pygame
 import qrcode
 from qrcode.image.pil import PilImage
@@ -11,6 +10,21 @@ PAIR_KIND    = "leanframe_setup_v1"
 SETUP_BASE   = os.environ.get("SETUP_BASE", "http://rpi.local:8000")
 PROVISION_OK = Path("/var/lib/leanframe/provisioned")
 TIMEOUT_SEC  = 15 * 60  # 15 minutes
+
+def _read_ap_env():
+    ssid = psk = None
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"): continue
+            if line.startswith("AP_SSID="): ssid = line.split("=",1)[1]
+            if line.startswith("AP_PSK="):  psk  = line.split("=",1)[1]
+    if not ssid or not psk:
+        # Fallback: derive from machine-id to keep it stable
+        mid = Path("/etc/machine-id").read_text().strip()[:8]
+        ssid = ssid or f"LeanFrame-{mid}"
+        psk  = psk  or f"Frame-{mid}"
+    return ssid, psk
 
 def _qr_pil_to_surface(img_pil):
     mode = img_pil.mode
@@ -30,9 +44,8 @@ def _detect_ip():
     return ip
 
 def main():
-    device_id = str(uuid.uuid4())[:8]
-    ap_ssid   = f"LeanFrame-{device_id}"
-    ap_psk    = "see-qr"
+    device_id = Path("/etc/machine-id").read_text().strip()[:8]
+    ap_ssid, ap_psk = _read_ap_env()
     pair_code = str(uuid.uuid4())[:4].upper()
 
     payload = {
@@ -44,26 +57,19 @@ def main():
         "setup_base": SETUP_BASE,
     }
 
-    # Build QR
     qr = qrcode.QRCode(border=2, box_size=8)
     qr.add_data(json.dumps(payload))
     qr.make(fit=True)
     img = qr.make_image(fill_color="black", back_color="white",
                         image_factory=PilImage).convert("RGB")
 
-    # Pygame window
     pygame.init()
-    print("[onboarding] pygame initialized; opening window...", flush=True)
-
-    # W, H = 800, 480
-    # screen = pygame.display.set_mode((W, H))
-    info = pygame.display.Info()        # reads the current display size
+    info = pygame.display.Info()
     W, H = info.current_w, info.current_h
-    flags = pygame.FULLSCREEN | pygame.NOFRAME
+    flags = pygame.FULLSCREEN  # | pygame.NOFRAME  # add NOFRAME if desired
     screen = pygame.display.set_mode((W, H), flags)
-    pygame.mouse.set_visible(False)
-    print("[onboarding] window created; entering event loop", flush=True)
     pygame.display.set_caption("LeanFrame Setup")
+    pygame.mouse.set_visible(False)
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 28)
     mono = pygame.font.SysFont("monospace", 22)
@@ -81,8 +87,6 @@ def main():
     t0   = time.time()
 
     while True:
-        if int(time.time() - t0) % 30 == 0:
-            print("[onboarding] still running...", flush=True)
         for e in pygame.event.get():
             if e.type == pygame.QUIT:
                 pygame.quit(); return
@@ -112,7 +116,6 @@ def main():
         screen.blit(title, (W//2 - title.get_width()//2, 16))
         screen.blit(qr_surf, (W//2 - qr_rect.width//2, H//2 - qr_rect.height//2 - 20))
 
-        # Hints & footer
         screen.blit(mono.render(f"SSID: {ap_ssid}", True, (70,70,70)), (20, H-80))
         screen.blit(mono.render(f"PSK : {ap_psk}", True, (70,70,70)), (20, H-54))
         screen.blit(mono.render(f"Setup base: {SETUP_BASE}", True, (100,100,100)), (20, 56))

@@ -215,6 +215,79 @@ sudo chmod 440 "${SUDOERS_DROPIN}"
 sudo visudo -cf "${SUDOERS_DROPIN}"
 echo "Created sudoers drop-in at ${SUDOERS_DROPIN} (validated)."
 
+# --- Ensure NetworkManager is present (skip if you already use it) ---
+if ! command -v nmcli >/dev/null 2>&1; then
+  echo "ERROR: nmcli not found. Install NetworkManager and ensure wlan0 is managed by it."
+  echo "On Raspberry Pi OS Bookworm, NetworkManager is default."
+  # exit 1   # or comment if you’ll install manually
+fi
+
+# --- Shared AP env (stable SSID/PSK derived from machine-id) ---
+sudo mkdir -p /var/lib/leanframe
+ID="$(cut -c1-8 /etc/machine-id)"
+SSID="LeanFrame-${ID}"
+PSK="Frame-${ID}"
+sudo tee /var/lib/leanframe/setup_ap.env >/dev/null <<EOF
+AP_SSID=${SSID}
+AP_PSK=${PSK}
+EOF
+sudo chmod 644 /var/lib/leanframe/setup_ap.env
+
+# --- Install hotspot helper ---
+sudo tee /usr/local/bin/leanframe-ap >/dev/null <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+ENV_FILE="/var/lib/leanframe/setup_ap.env"
+IFACE="${IFACE:-wlan0}"
+CON_NAME="leanframe-setup"
+[[ -f "$ENV_FILE" ]] || { echo "Missing $ENV_FILE"; exit 1; }
+source "$ENV_FILE"
+SSID="${AP_SSID:?}"
+PSK="${AP_PSK:?}"
+case "${1:-}" in
+  up)
+    if nmcli -t -f NAME connection show | grep -qx "$CON_NAME"; then
+      nmcli connection modify "$CON_NAME" 802-11-wireless.ssid "$SSID" \
+        802-11-wireless.mode ap 802-11-wireless.band bg ipv4.method shared \
+        wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$PSK" connection.autoconnect no
+    else
+      nmcli connection add type wifi ifname "$IFACE" con-name "$CON_NAME" ssid "$SSID"
+      nmcli connection modify "$CON_NAME" 802-11-wireless.mode ap 802-11-wireless.band bg \
+        ipv4.method shared wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$PSK" connection.autoconnect no
+    fi
+    nmcli connection up "$CON_NAME"
+    ;;
+  down)
+    nmcli -t -f NAME connection show | grep -qx "$CON_NAME" && nmcli connection down "$CON_NAME" || true
+    ;;
+  delete)
+    nmcli -t -f NAME connection show | grep -qx "$CON_NAME" && nmcli connection delete "$CON_NAME" || true
+    ;;
+  *) echo "Usage: $0 {up|down|delete}"; exit 2;;
+esac
+EOF
+sudo chmod 0755 /usr/local/bin/leanframe-ap
+
+# --- System service for hotspot ---
+sudo tee /etc/systemd/system/leanframe-hotspot.service >/dev/null <<'EOF'
+[Unit]
+Description=LeanFrame onboarding hotspot (NetworkManager AP)
+Wants=NetworkManager.service
+After=NetworkManager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/leanframe-ap up
+ExecStop=/usr/local/bin/leanframe-ap down
+
+[Install]
+WantedBy=multi-user.target
+EOF
+# sudo systemctl daemon-reload
+# sudo systemctl enable leanframe-hotspot.service
+# Do NOT start here automatically; onboarding can start/stop if you prefer
+
 # ===== Make the user manager survive boot (do once) =====
 sudo loginctl enable-linger "${USER_NAME}"
 
