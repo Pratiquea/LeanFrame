@@ -55,8 +55,13 @@ def main():
     pygame.init()
     print("[onboarding] pygame initialized; opening window...", flush=True)
 
-    W, H = 800, 480
-    screen = pygame.display.set_mode((W, H))
+    # W, H = 800, 480
+    # screen = pygame.display.set_mode((W, H))
+    info = pygame.display.Info()        # reads the current display size
+    W, H = info.current_w, info.current_h
+    flags = pygame.FULLSCREEN | pygame.NOFRAME
+    screen = pygame.display.set_mode((W, H), flags)
+    pygame.mouse.set_visible(False)
     print("[onboarding] window created; entering event loop", flush=True)
     pygame.display.set_caption("LeanFrame Setup")
     clock = pygame.time.Clock()
