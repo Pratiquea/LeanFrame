@@ -8,7 +8,7 @@ REPO_DIR="${HOME_DIR}/gits/LeanFrame"              # your repo
 VENV_BIN="${REPO_DIR}/.venv/bin"                   # existing venv bin
 PHOTO_DIR="${HOME_DIR}/DrivePhotos"                # local photo cache (for sync)
 RCLONE_REMOTE="gdrive"                             # rclone remote name
-DRIVE_PATH=""                             # Drive folder name OR ID (keep quotes for ID)
+DRIVE_PATH=""                                      # Drive folder name OR ID (keep quotes for ID)
 
 # Pairing backend config
 BACKEND_DIR="${REPO_DIR}/pairing_backend"
@@ -30,16 +30,14 @@ if [[ -f "${BACKEND_ENV_FILE}" ]]; then
   # Robust .env parser for simple KEY=VALUE lines (handles quotes, ignores comments/blank lines)
   parse_env () {
     local key="$1"
-    # get last occurrence if multiple
     local line
     line="$(grep -E "^[[:space:]]*${key}[[:space:]]*=" "${BACKEND_ENV_FILE}" | tail -n1 || true)"
     [[ -n "${line}" ]] || { echo ""; return 0; }
-    # strip leading "KEY=" and surrounding quotes/spaces
     line="${line#*=}"
-    line="${line#"${line%%[![:space:]]*}"}"          # ltrim space
-    line="${line%${line##*[![:space:]]}}"            # rtrim space
-    line="${line%\"}"; line="${line#\"}"             # strip double quotes if present
-    line="${line%\'}"; line="${line#\'}"             # strip single quotes if present
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%${line##*[![:space:]]}}"
+    line="${line%\"}"; line="${line#\"}"
+    line="${line%\'}"; line="${line#\'}"
     echo "$line"
   }
 
@@ -65,7 +63,6 @@ RCLONE_CLIENT_SECRET=${RCLONE_CLIENT_SECRET}
 EOF
 sudo chmod 600 "${SECRETS_FILE}"
 
-
 # ===== Create user units (~/.config/systemd/user) =====
 USER_UNIT_DIR="${HOME_DIR}/.config/systemd/user"
 mkdir -p "${USER_UNIT_DIR}"
@@ -79,7 +76,7 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/rpi/gits/LeanFrame
+WorkingDirectory=${REPO_DIR}
 EnvironmentFile=/etc/leanframe.env
 Environment=PYTHONUNBUFFERED=1
 Environment=SDL_VIDEODRIVER=wayland
@@ -92,9 +89,6 @@ RestartSec=2
 [Install]
 WantedBy=default.target
 EOF
-
-# Patch username in the unit paths
-sed -i "s|/home/rpi|${HOME_DIR}|g" "${USER_UNIT_DIR}/leanframe.service"
 
 # Path unit to start LeanFrame when Wayland socket appears
 cat > "${USER_UNIT_DIR}/leanframe-wayland.path" <<EOF
@@ -139,6 +133,8 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 EOF
+# Replace the USER placeholder inside the unit with the actual login user
+sudo sed -i "s|\${USER}|${USER_NAME}|g" /etc/systemd/system/leanframe-switch.service
 
 # leanframe-sync.service (system service for rclone sync)
 sudo tee /etc/systemd/system/leanframe-sync.service >/dev/null <<EOF
@@ -152,7 +148,6 @@ User=${USER_NAME}
 EnvironmentFile=/etc/leanframe.env
 EnvironmentFile=${SECRETS_FILE}
 ExecStartPre=/usr/bin/mkdir -p "\${PHOTO_DIR}"
-# If you decide to use RCLONE_CLIENT_ID/SECRET with rclone, add: --client-id and --client-secret
 ExecStart=/usr/bin/rclone sync "\${RCLONE_REMOTE}:\${DRIVE_PATH}" "\${PHOTO_DIR}" \\
   --fast-list --transfers 4 --checkers 8 --create-empty-src-dirs=false
 
@@ -181,14 +176,11 @@ After=graphical-session.target
 [Service]
 Type=simple
 WorkingDirectory=%h/gits/LeanFrame
-# Env for Wayland sessions
 Environment=PYTHONUNBUFFERED=1
 Environment=SDL_VIDEODRIVER=wayland
 Environment=WAYLAND_DISPLAY=wayland-0
 Environment=XDG_RUNTIME_DIR=%t
-# Wait for the compositor’s socket so the window can open
 ExecStartPre=/bin/sh -lc 'for i in $(seq 1 20); do [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && exit 0; sleep 1; done; echo "wayland-0 not ready"; exit 1'
-# Run onboarding (logs go to journal)
 ExecStart=%h/gits/LeanFrame/.venv/bin/python -m photoframe.onboarding
 Restart=no
 StandardOutput=journal
@@ -197,8 +189,7 @@ StandardError=journal
 [Install]
 WantedBy=graphical-session.target
 EOF
-systemctl --user enable --now leanframe-onboarding.service
-
+systemctl --user enable --now leanframe-onboarding.service || true
 
 # ===== Allow $USER_NAME to restart the switcher without password (sudoers drop-in) =====
 # This enables the FastAPI /provision endpoint to run:
@@ -218,8 +209,6 @@ echo "Created sudoers drop-in at ${SUDOERS_DROPIN} (validated)."
 # --- Ensure NetworkManager is present (skip if you already use it) ---
 if ! command -v nmcli >/dev/null 2>&1; then
   echo "ERROR: nmcli not found. Install NetworkManager and ensure wlan0 is managed by it."
-  echo "On Raspberry Pi OS Bookworm, NetworkManager is default."
-  # exit 1   # or comment if you’ll install manually
 fi
 
 # --- Shared AP env (stable SSID/PSK derived from machine-id) ---
@@ -254,7 +243,7 @@ case "${1:-}" in
       nmcli connection add type wifi ifname "$IFACE" con-name "$CON_NAME" ssid "$SSID"
       nmcli connection modify "$CON_NAME" 802-11-wireless.mode ap 802-11-wireless.band bg \
         ipv4.method shared wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$PSK" connection.autoconnect no
-    fi
+    fi>
     nmcli connection up "$CON_NAME"
     ;;
   down)
@@ -284,9 +273,6 @@ ExecStop=/usr/local/bin/leanframe-ap down
 [Install]
 WantedBy=multi-user.target
 EOF
-# sudo systemctl daemon-reload
-# sudo systemctl enable leanframe-hotspot.service
-# Do NOT start here automatically; onboarding can start/stop if you prefer
 
 # ===== Make the user manager survive boot (do once) =====
 sudo loginctl enable-linger "${USER_NAME}"
@@ -298,27 +284,19 @@ if systemctl list-unit-files | grep -q '^leanframe.service'; then
   sudo systemctl daemon-reload || true
 fi
 
-# ===== Enable & start user units =====
+# ===== Enable & start user/system units =====
 systemctl --user daemon-reload
-# NOT enabling user leanframe units now; the switcher will do it post-provision.
 sudo systemctl daemon-reload
-# systemctl --user enable --now leanframe.service
-# systemctl --user enable --now leanframe-wayland.path
-systemctl --user enable --now leanframe-onboarding.service
-# sudo systemctl enable --now leanframe-setup.service || true
+systemctl --user enable --now leanframe-onboarding.service || true
 sudo systemctl enable --now leanframe-switch.service
 sudo systemctl enable --now leanframe-sync.timer
-# Warm sync (non-fatal if it fails; check logs with journalctl -u leanframe-sync)
-sudo systemctl start leanframe-sync.service || true
-
-
+sudo systemctl start  leanframe-sync.service || true
 
 echo "-------------------------------------------------------------"
-echo "User units (created but not enabled yet):"
+echo "User units (created):"
 echo "  ${USER_UNIT_DIR}/leanframe.service"
 echo "  ${USER_UNIT_DIR}/leanframe-wayland.path"
 echo "System units:"
-# echo "  /etc/systemd/system/leanframe-setup.service"
 echo "  /etc/systemd/system/leanframe-switch.service"
 echo "  /etc/systemd/system/leanframe-sync.service"
 echo "  /etc/systemd/system/leanframe-sync.timer"
