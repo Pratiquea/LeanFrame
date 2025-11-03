@@ -167,6 +167,7 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
   final ssidCtrl = TextEditingController();
   final passCtrl = TextEditingController();
   bool posting = false;
+  bool _handledScan = false; 
   String? error;
 
   @override
@@ -211,25 +212,42 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
       Expanded(
         child: MobileScanner(
           onDetect: (capture) {
+            if (_handledScan) return; // throttle multiple callbacks
             final b = capture.barcodes.firstOrNull;
-            if (b == null) return;
+            final raw = b?.rawValue;
+            if (raw == null || raw.isEmpty) {
+              // Ignore frames with no string payload
+              return;
+            }
             try {
-              final j = json.decode(b.rawValue!);
-              final p = PairPayload.fromJson(j);
-              setState(() { payload = p; step = 2; });
+              final j = json.decode(raw) as Map<String, dynamic>;
+              final p = PairPayload.fromJson(j);     // can throw (we catch below)
+              setState(() {
+                payload = p;
+                _handledScan = true;
+                step = 2;                             // go to “Connect to setup Wi-Fi”
+              });
             } catch (e) {
               setState(() => error = "Invalid QR: $e");
             }
           },
         ),
       ),
-      if (error != null) Padding(
-        padding: const EdgeInsets.all(12), child: Text(error!, style: const TextStyle(color: Colors.red))),
+      if (error != null)
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: Text(error!, style: const TextStyle(color: Colors.red)),
+        ),
       const SizedBox(height: 8),
     ]);
   }
 
   Widget _stepConnectAP() {
+    if (payload == null) {
+      // user navigated here without a valid scan
+      return _inlineError("Please scan the QR first", backTo: 1);
+    }
+
     final p = payload!;
     return Padding(
       padding: const EdgeInsets.all(16),
@@ -250,6 +268,9 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
   }
 
   Widget _stepEnterHomeWifi() {
+    if (payload == null) {
+      return _inlineError("Please scan the QR first", backTo: 1);
+    }
     final p = payload!;
     return Padding(
       padding: const EdgeInsets.all(16),
@@ -296,6 +317,26 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
     );
   }
 
+  Widget _inlineError(String msg, {required int backTo}) {
+    return Padding(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(msg, style: const TextStyle(color: Colors.red)),
+          const Spacer(),
+          Row(children: [
+            const Spacer(),
+            FilledButton(
+              onPressed: () => setState(() => step = backTo),
+              child: const Text("Go back"),
+            ),
+          ]),
+        ],
+      ),
+    );
+  }
+
   Widget _stepDone() {
     return Padding(
       padding: const EdgeInsets.all(16),
@@ -326,17 +367,26 @@ extension<T> on List<T> {
 class PairPayload {
   final String ssid, psk, pairCode, deviceId, setupBase;
   PairPayload(this.ssid, this.psk, this.pairCode, this.deviceId, this.setupBase);
-  factory PairPayload.fromJson(Map<String,dynamic> j) {
+
+  factory PairPayload.fromJson(Map<String, dynamic> j) {
     final kind = j["kind"] ?? "leanframe_setup_v1";
     if (kind != "leanframe_setup_v1") {
-      throw Exception("Unsupported QR kind");
+      throw Exception("Unsupported QR kind '$kind'");
+    }
+    String req(String k) {
+      final v = j[k];
+      if (v is String && v.isNotEmpty) return v;
+      throw Exception("QR is missing '$k'");
     }
     return PairPayload(
-      j["ap_ssid"], j["ap_psk"], j["pair_code"], j["device_id"], j["setup_base"]
+      req("ap_ssid"),
+      req("ap_psk"),
+      req("pair_code"),
+      req("device_id"),
+      req("setup_base"),
     );
   }
 }
-
 
 /// ----------------------------------------------------------------------------
 /// App root
