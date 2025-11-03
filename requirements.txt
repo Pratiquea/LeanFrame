@@ -10,3 +10,4 @@ PyTurboJPEG
 jinja2
 requests
 python-dotenv
+qrcode[pil]
