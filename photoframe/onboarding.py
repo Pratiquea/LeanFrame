@@ -7,8 +7,9 @@ import qrcode
 from qrcode.image.pil import PilImage
 
 PAIR_KIND    = "leanframe_setup_v1"
-SETUP_BASE   = os.environ.get("SETUP_BASE", "http://rpi.local:8000")
 PROVISION_OK = Path("/var/lib/leanframe/provisioned")
+AP_IP        = os.environ.get("AP_IP", "192.168.42.1")
+SETUP_BASE   = f"http://{AP_IP}:8765"
 TIMEOUT_SEC  = 15 * 60  # 15 minutes
 ENV_FILE     = Path("/var/lib/leanframe/setup_ap.env")
 
@@ -49,20 +50,26 @@ def main():
     ap_ssid, ap_psk = _read_ap_env()
     pair_code = str(uuid.uuid4())[:4].upper()
 
-    payload = {
-        "kind": PAIR_KIND,
-        "device_id": device_id,
-        "pair_code": pair_code,
-        "ap_ssid": ap_ssid,
-        "ap_psk": ap_psk,
-        "setup_base": SETUP_BASE,
-    }
+    # payload = {
+    #     "kind": PAIR_KIND,
+    #     "device_id": device_id,
+    #     "pair_code": pair_code,
+    #     "ap_ssid": ap_ssid,
+    #     "ap_psk": ap_psk,
+    #     "setup_base": SETUP_BASE,
+    # }
 
-    qr = qrcode.QRCode(border=2, box_size=8)
-    qr.add_data(json.dumps(payload))
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white",
-                        image_factory=PilImage).convert("RGB")
+    # qr = qrcode.QRCode(border=2, box_size=8)
+    # qr.add_data(json.dumps(payload))
+    # qr.make(fit=True)
+    # img = qr.make_image(fill_color="black", back_color="white",
+    #                     image_factory=PilImage).convert("RGB")
+    # auto join hotspot built-in Wi-Fi QR support
+    wifi_payload = f"WIFI:T:WPA;S:{ap_ssid};P:{ap_psk};H:false;;"
+    wifi_qr = qrcode.QRCode(border=2, box_size=10)
+    wifi_qr.add_data(wifi_payload); wifi_qr.make(fit=True)
+    img = wifi_qr.make_image(fill_color="black", back_color="white",
+                             image_factory=PilImage).convert("RGB")
 
     pygame.init()
     info = pygame.display.Info()
@@ -119,7 +126,7 @@ def main():
 
         screen.blit(mono.render(f"SSID: {ap_ssid}", True, (70,70,70)), (20, H-80))
         screen.blit(mono.render(f"PSK : {ap_psk}", True, (70,70,70)), (20, H-54))
-        screen.blit(mono.render(f"Setup base: {SETUP_BASE}", True, (100,100,100)), (20, 56))
+        screen.blit(mono.render(f"Setup URL: {SETUP_BASE}", True, (100,100,100)), (20, 56))
         screen.blit(mono.render(f"Host: {host}   IP: {ip}", True, (100,100,100)), (20, 82))
 
         pygame.display.flip()
