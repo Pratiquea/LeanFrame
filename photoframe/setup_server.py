@@ -5,8 +5,33 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from typing import Dict, Any
-from .wifi import ensure_ap_started, connect_wifi, stop_ap, current_state, mark_provisioned
-AP_IP = "192.168.4.1"
+from .wifi import connect_wifi, current_state, mark_provisioned
+import subprocess
+AP_ENV = Path("/var/lib/leanframe/setup_ap.env")
+AP_IP  = "192.168.4.1"
+
+def read_ap_env():
+    ssid = psk = None
+    if AP_ENV.exists():
+        for line in AP_ENV.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"): continue
+            if line.startswith("AP_SSID="): ssid = line.split("=",1)[1]
+            if line.startswith("AP_PSK="):  psk  = line.split("=",1)[1]
+    return ssid, psk
+
+def ensure_hotspot_started():
+    # single source of truth: systemd service (idempotent)
+    try:
+        subprocess.run(["/usr/bin/systemctl", "start", "leanframe-hotspot.service"], check=False)
+    except Exception:
+        pass
+
+def stop_hotspot():
+    try:
+        subprocess.run(["/usr/bin/systemctl", "stop", "leanframe-hotspot.service"], check=False)
+    except Exception:
+        pass
 
 app = FastAPI(title="LeanFrame Setup")
 
@@ -20,22 +45,24 @@ app.add_middleware(
 @app.get("/pair")
 def get_pair_info():
     """
-    Returns QR payload:
-    {
-      ap_ssid, ap_psk,
-      pair_code,
-      device_id,
-      setup_base: "http://192.168.4.1:8765"
-    }
+    Returns QR payload (for app fallback) and shows matching WIFI: QR in onboarding.
     """
-    ssid, psk, pair, dev = ensure_ap_started()
+    ensure_hotspot_started()
+    ssid, psk = read_ap_env()
+    if not ssid or not psk:
+        raise HTTPException(500, "AP env missing")
+    # if you still want a pair code, derive it here (or from your state)
+    st = current_state()
+    dev = st.get("device_id") or "unknown"
+    pair = st.get("pair_code") or "0000"
     return {
         "ap_ssid": ssid,
         "ap_psk": psk,
         "pair_code": pair,
         "device_id": dev,
         "setup_base": f"http://{AP_IP}:8765"
-    }
+     }
+
 
 @app.post("/provision")
 async def provision(body: Dict[str, Any]):
@@ -60,8 +87,8 @@ async def provision(body: Dict[str, Any]):
     if not ok:
         raise HTTPException(400, "Failed to join Wi-Fi (wrong SSID/password?)")
 
-    # Success: stop AP so the frame joins LAN
-    stop_ap()
+    # Success: stop AP (systemd) so the frame joins LAN
+    stop_hotspot()
 
     # figure out a LAN IP to return (best effort)
     try:
@@ -76,7 +103,6 @@ async def provision(body: Dict[str, Any]):
     mark_provisioned(ip)
     # Immediately flip services to normal mode (no reboot needed)
     try:
-        import subprocess
         print("[setup_server] Provisioning complete, restarting leanframe-switch.service to load main runtime…")
         subprocess.run(
             ["sudo", "systemctl", "restart", "leanframe-switch.service"],
@@ -92,7 +118,7 @@ def status():
 
 def main():
     # Ensure AP is up and QR has content
-    ensure_ap_started()
+    ensure_hotspot_started()
     uvicorn.run(app, host="0.0.0.0", port=8765)
 
 if __name__ == "__main__":

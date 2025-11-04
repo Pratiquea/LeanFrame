@@ -64,7 +64,8 @@ def main():
     # qr.make(fit=True)
     # img = qr.make_image(fill_color="black", back_color="white",
     #                     image_factory=PilImage).convert("RGB")
-    # auto join hotspot built-in Wi-Fi QR support
+    # 1) Primary QR: auto-join hotspot (Android/iOS built-in Wi-Fi QR support)
+    # NOTE: Keep ASCII only; avoid quotes or non-ASCII chars.
     wifi_payload = f"WIFI:T:WPA;S:{ap_ssid};P:{ap_psk};H:false;;"
     wifi_qr = qrcode.QRCode(border=2, box_size=10)
     wifi_qr.add_data(wifi_payload); wifi_qr.make(fit=True)
