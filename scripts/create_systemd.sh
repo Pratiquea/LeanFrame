@@ -103,6 +103,33 @@ Unit=leanframe.service
 WantedBy=default.target
 EOF
 
+## New: unified "setup" wrapper (system) that starts hotspot + setup_server + onboarding together
+sudo tee /etc/systemd/system/leanframe-setup.service >/dev/null <<EOF
+[Unit]
+Description=LeanFrame first-run setup (AP + QR + setup server)
+After=network-online.target
+Wants=network-online.target
+ 
+[Service]
+Type=simple
+User=${USER_NAME}
+WorkingDirectory=${REPO_DIR}
+Environment=PYTHONUNBUFFERED=1
+Environment=AP_IP=192.168.4.1
+Environment=SDL_VIDEODRIVER=wayland
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=%t
+ExecStartPre=/bin/sh -lc 'for i in \$(seq 1 20); do [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && exit 0; sleep 1; done; echo "wayland-0 not ready"; exit 1'
+ExecStartPre=/usr/bin/systemctl start leanframe-hotspot.service
+ExecStart=${VENV_BIN}/python -m photoframe.setup_server
+ExecStartPost=${VENV_BIN}/python -m photoframe.onboarding
+ExecStopPost=/usr/bin/systemctl stop leanframe-hotspot.service
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
 # Boot switch: choose setup vs normal
 sudo tee /etc/systemd/system/leanframe-switch.service >/dev/null <<'EOF'
 [Unit]
@@ -137,59 +164,35 @@ EOF
 sudo sed -i "s|\${USER}|${USER_NAME}|g" /etc/systemd/system/leanframe-switch.service
 
 # leanframe-sync.service (system service for rclone sync)
-sudo tee /etc/systemd/system/leanframe-sync.service >/dev/null <<EOF
-[Unit]
-Description=LeanFrame: rclone sync Drive -> local photo cache
-Wants=network-online.target
-After=network-online.target
+# sudo tee /etc/systemd/system/leanframe-sync.service >/dev/null <<EOF
+# [Unit]
+# Description=LeanFrame: rclone sync Drive -> local photo cache
+# Wants=network-online.target
+# After=network-online.target
 
-[Service]
-User=${USER_NAME}
-EnvironmentFile=/etc/leanframe.env
-EnvironmentFile=${SECRETS_FILE}
-ExecStartPre=/usr/bin/mkdir -p "\${PHOTO_DIR}"
-ExecStart=/usr/bin/rclone sync "\${RCLONE_REMOTE}:\${DRIVE_PATH}" "\${PHOTO_DIR}" \\
-  --fast-list --transfers 4 --checkers 8 --create-empty-src-dirs=false
+# [Service]
+# User=${USER_NAME}
+# EnvironmentFile=/etc/leanframe.env
+# EnvironmentFile=${SECRETS_FILE}
+# ExecStartPre=/usr/bin/mkdir -p "\${PHOTO_DIR}"
+# ExecStart=/usr/bin/rclone sync "\${RCLONE_REMOTE}:\${DRIVE_PATH}" "\${PHOTO_DIR}" \\
+#   --fast-list --transfers 4 --checkers 8 --create-empty-src-dirs=false
 
-EOF
+# EOF
 
-# Timer
-sudo tee /etc/systemd/system/leanframe-sync.timer >/dev/null <<EOF
-[Unit]
-Description=Run LeanFrame sync periodically (10 mins)
+# # Timer
+# sudo tee /etc/systemd/system/leanframe-sync.timer >/dev/null <<EOF
+# [Unit]
+# Description=Run LeanFrame sync periodically (10 mins)
 
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=10min
-Unit=leanframe-sync.service
+# [Timer]
+# OnBootSec=2min
+# OnUnitActiveSec=10min
+# Unit=leanframe-sync.service
 
-[Install]
-WantedBy=timers.target
-EOF
-
-cat > "${USER_UNIT_DIR}/leanframe-onboarding.service" <<'EOF'
-[Unit]
-Description=LeanFrame onboarding QR (user session)
-Wants=graphical-session.target
-After=graphical-session.target
-
-[Service]
-Type=simple
-WorkingDirectory=%h/gits/LeanFrame
-Environment=PYTHONUNBUFFERED=1
-Environment=SDL_VIDEODRIVER=wayland
-Environment=WAYLAND_DISPLAY=wayland-0
-Environment=XDG_RUNTIME_DIR=%t
-ExecStartPre=/bin/sh -lc 'for i in $(seq 1 20); do [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && exit 0; sleep 1; done; echo "wayland-0 not ready"; exit 1'
-ExecStart=%h/gits/LeanFrame/.venv/bin/python -m photoframe.onboarding
-Restart=no
-StandardOutput=journal
-StandardError=journal
-
-[Install]
-WantedBy=graphical-session.target
-EOF
-systemctl --user enable --now leanframe-onboarding.service || true
+# [Install]
+# WantedBy=timers.target
+# EOF
 
 # ===== Allow $USER_NAME to restart the switcher without password (sudoers drop-in) =====
 # This enables the FastAPI /provision endpoint to run:
@@ -237,13 +240,15 @@ case "${1:-}" in
   up)
     if nmcli -t -f NAME connection show | grep -qx "$CON_NAME"; then
       nmcli connection modify "$CON_NAME" 802-11-wireless.ssid "$SSID" \
-        802-11-wireless.mode ap 802-11-wireless.band bg ipv4.method shared \
-        wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$PSK" connection.autoconnect no
+      802-11-wireless.mode ap 802-11-wireless.band bg \
+      ipv4.method shared ipv4.addresses 192.168.4.1/24 \
+      wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$PSK" connection.autoconnect no
     else
       nmcli connection add type wifi ifname "$IFACE" con-name "$CON_NAME" ssid "$SSID"
       nmcli connection modify "$CON_NAME" 802-11-wireless.mode ap 802-11-wireless.band bg \
-        ipv4.method shared wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$PSK" connection.autoconnect no
-    fi>
+      ipv4.method shared ipv4.addresses 192.168.4.1/24 \
+      wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$PSK" connection.autoconnect no
+  fi
     nmcli connection up "$CON_NAME"
     ;;
   down)
@@ -284,10 +289,11 @@ if systemctl list-unit-files | grep -q '^leanframe.service'; then
   sudo systemctl daemon-reload || true
 fi
 
+# ===== Ensure state dir exists and is writable by ${USER_NAME} =====
+sudo install -d -m 0775 -o "${USER_NAME}" -g "${USER_NAME}" /var/lib/leanframe
 # ===== Enable & start user/system units =====
 systemctl --user daemon-reload
 sudo systemctl daemon-reload
-systemctl --user enable --now leanframe-onboarding.service || true
 sudo systemctl enable --now leanframe-switch.service
 sudo systemctl enable --now leanframe-sync.timer
 sudo systemctl start  leanframe-sync.service || true
