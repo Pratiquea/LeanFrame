@@ -15,6 +15,60 @@ BACKEND_DIR="${REPO_DIR}/pairing_backend"
 BACKEND_ENV_FILE="${BACKEND_DIR}/.env"            # will be parsed for REMOTE_* values
 SECRETS_FILE="/etc/leanframe.secrets"             # root-only file to hold sensitive vars
 
+SDL_DRIVER="x11"                 # default
+WAYLAND_DISPLAY_NAME="wayland-0" # conventional name
+DISPLAY_FALLBACK=":0"           # conventional X11 display
+
+# Prefer Wayland if the socket exists in the current session
+if [[ -n "${XDG_RUNTIME_DIR:-}" && -S "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY_NAME}" ]]; then
+  SDL_DRIVER="wayland"
+fi
+
+# Helper to emit Environment= lines for unit templates
+emit_display_env_user() {
+  if [[ "${SDL_DRIVER}" == "wayland" ]]; then
+    # User unit uses its own %t runtime dir
+    cat <<'EOT'
+Environment=SDL_VIDEODRIVER=wayland
+Environment=WAYLAND_DISPLAY=wayland-0
+
+# Wait (best-effort) for the Wayland socket; no-op if it doesn't appear
+ExecStartPre=/bin/sh -lc 'for i in $(seq 1 15); do [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && exit 0; sleep 1; done; exit 0'
+EOT
+  else
+    # X11 default
+    cat <<EOT
+Environment=SDL_VIDEODRIVER=x11
+Environment=DISPLAY=${DISPLAY_FALLBACK}
+# No Wayland wait needed; keep a no-op to avoid failures
+ExecStartPre=/bin/true
+EOT
+  fi
+}
+
+emit_display_env_system() {
+  # System unit must point at the user's runtime dir explicitly
+  cat <<'EOT'
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+EOT
+  if [[ "${SDL_DRIVER}" == "wayland" ]]; then
+    cat <<'EOT'
+Environment=SDL_VIDEODRIVER=wayland
+Environment=WAYLAND_DISPLAY=wayland-0
+# Best-effort Wayland wait (no-op on non-Wayland)
+ExecStartPre=/bin/sh -lc 'for i in $(seq 1 20); do [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && exit 0; sleep 1; done; exit 0'
+EOT
+  else
+    # X11 default
+    cat <<EOT
+Environment=SDL_VIDEODRIVER=x11
+Environment=DISPLAY=${DISPLAY_FALLBACK}
+# No Wayland wait needed
+ExecStartPre=/bin/true
+EOT
+  fi
+}
+
 # ===== Sanity checks =====
 [[ -d "${REPO_DIR}" ]] || { echo "ERROR: Repo not found at ${REPO_DIR}"; exit 1; }
 [[ -x "${VENV_BIN}/python" ]] || {
@@ -70,7 +124,7 @@ mkdir -p "${USER_UNIT_DIR}"
 # leanframe.service (Wayland user service with socket wait)
 cat > "${USER_UNIT_DIR}/leanframe.service" <<EOF
 [Unit]
-Description=LeanFrame (Wayland user service; waits for compositor)
+Description=LeanFrame (user session; auto-detected display)
 Wants=graphical-session.target
 After=graphical-session.target
 
@@ -79,9 +133,7 @@ Type=simple
 WorkingDirectory=${REPO_DIR}
 EnvironmentFile=/etc/leanframe.env
 Environment=PYTHONUNBUFFERED=1
-Environment=SDL_VIDEODRIVER=wayland
-# Wait up to ~15s for Wayland socket to avoid race at login
-ExecStartPre=/bin/sh -lc 'for i in \$(seq 1 15); do [ -S "\$XDG_RUNTIME_DIR/wayland-0" ] && exit 0; sleep 1; done; echo "wayland-0 not ready"; exit 1'
+$(emit_display_env_user)
 ExecStart=${VENV_BIN}/python -m photoframe
 Restart=always
 RestartSec=2
@@ -116,10 +168,7 @@ User=${USER_NAME}
 WorkingDirectory=${REPO_DIR}
 Environment=PYTHONUNBUFFERED=1
 Environment=AP_IP=192.168.4.1
-Environment=SDL_VIDEODRIVER=wayland
-Environment=WAYLAND_DISPLAY=wayland-0
-Environment=XDG_RUNTIME_DIR=%t
-ExecStartPre=/bin/sh -lc 'for i in \$(seq 1 20); do [ -S "$XDG_RUNTIME_DIR/wayland-0" ] && exit 0; sleep 1; done; echo "wayland-0 not ready"; exit 1'
+$(emit_display_env_system)
 ExecStartPre=/usr/bin/systemctl start leanframe-hotspot.service
 ExecStart=${VENV_BIN}/python -m photoframe.setup_server
 ExecStartPost=${VENV_BIN}/python -m photoframe.onboarding
