@@ -10,6 +10,7 @@ PAIR_KIND    = "leanframe_setup_v1"
 SETUP_BASE   = os.environ.get("SETUP_BASE", "http://rpi.local:8000")
 PROVISION_OK = Path("/var/lib/leanframe/provisioned")
 TIMEOUT_SEC  = 15 * 60  # 15 minutes
+ENV_FILE     = Path("/var/lib/leanframe/setup_ap.env")
 
 def _read_ap_env():
     ssid = psk = None
