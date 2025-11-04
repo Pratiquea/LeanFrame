@@ -1,7 +1,12 @@
 # LeanFrame
 [![License: LeanFrame Personal Use](https://img.shields.io/badge/license-Personal--Use-lightgrey.svg)](#license)
 
+### 0) Radxa settings
+* Power Management: Go to Settings -> Power Management
+    * Disable Screen Energy Saving (uncheck)
+    * Disable Suspend session (uncheck)
 
+* Connections: Wifi -> Wifi-security tab -> Store password for all users (Below password) 
 ### 1) Install
 ```bash
 sudo apt-get update
