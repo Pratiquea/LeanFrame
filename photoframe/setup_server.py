@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from typing import Dict, Any
 from .wifi import ensure_ap_started, connect_wifi, stop_ap, current_state, mark_provisioned
+AP_IP = "192.168.4.1"
 
 app = FastAPI(title="LeanFrame Setup")
 
@@ -33,7 +34,7 @@ def get_pair_info():
         "ap_psk": psk,
         "pair_code": pair,
         "device_id": dev,
-        "setup_base": "http://192.168.4.1:8765"
+        "setup_base": f"http://{AP_IP}:8765"
     }
 
 @app.post("/provision")
