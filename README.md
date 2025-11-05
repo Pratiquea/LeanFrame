@@ -7,10 +7,11 @@
     * Disable Suspend session (uncheck)
 
 * Connections: Wifi -> Wifi-security tab -> Store password for all users (Below password) 
+* Increase swap space
 ### 1) Install
 ```bash
 sudo apt-get update
-sudo apt-get install -y git python3-venv ffmpeg mpv libvips jq qrencode hostapd dnsmasq avahi-daemon network-manager
+sudo apt-get install -y git python3-venv ffmpeg mpv libvips jq qrencode hostapd dnsmasq avahi-daemon network-manager avahi-utils libnss-mdns
 git clone <this-repo> && cd LeanFrame
 python3 -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
