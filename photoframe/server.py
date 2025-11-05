@@ -260,7 +260,8 @@ async def put_runtime(payload: Dict[str, Any]):
     # and remove alias duplicates if present.
     pb = data.setdefault("playback", {})
     pb["default_image_seconds"] = slide_duration_s
-    pb["transition_crossfade_ms"] = crossfade_ms
+    # pb["transition_crossfade_ms"] = crossfade_ms
+    pb["crossfade_ms"] = crossfade_ms
     pb["shuffle"] = shuffle
     pb["loop"] = loop
     # remove alias keys that cause duplicates for loaders with aliases
