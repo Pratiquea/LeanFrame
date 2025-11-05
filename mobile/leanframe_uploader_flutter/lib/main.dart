@@ -1062,27 +1062,55 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
+
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: CupertinoSegmentedControl<HubTab>(
-              groupValue: tab,
-              onValueChanged: (v) => setState(() => tab = v),
-              children: const {
-                HubTab.photos: Padding(
-                  padding: EdgeInsets.all(8),
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(Icons.grid_on, size: 16), SizedBox(width: 6), Text("Photos")
-                  ]),
-                ),
-                HubTab.settings: Padding(
-                  padding: EdgeInsets.all(8),
-                  child: Row(mainAxisSize: MainAxisSize.min, children: [
-                    Icon(Icons.settings, size: 16), SizedBox(width: 6), Text("Settings")
-                  ]),
-                ),
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                const double kSegHeight = 44; // tweak (40–48 feels nice)
+                final totalWidth = constraints.maxWidth;
+                final segmentWidth = totalWidth / 2;
+
+                return CupertinoSegmentedControl<HubTab>(
+                  groupValue: tab,
+                  onValueChanged: (v) => setState(() => tab = v),
+                  // Optional: tighter outer padding so height is driven by children
+                  padding: const EdgeInsets.all(2),
+                  children: {
+                    HubTab.photos: SizedBox(
+                      width: segmentWidth,
+                      height: kSegHeight,
+                      child: const Center(
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.grid_on, size: 18),
+                            SizedBox(width: 6),
+                            Text("Photos"),
+                          ],
+                        ),
+                      ),
+                    ),
+                    HubTab.settings: SizedBox(
+                      width: segmentWidth,
+                      height: kSegHeight,
+                      child: const Center(
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.settings, size: 18),
+                            SizedBox(width: 6),
+                            Text("Settings"),
+                          ],
+                        ),
+                      ),
+                    ),
+                  },
+                );
               },
             ),
           ),
+
 
           const SizedBox(height: 8),
           if (tab == HubTab.photos)
