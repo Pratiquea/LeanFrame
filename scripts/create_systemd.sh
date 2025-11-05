@@ -274,6 +274,45 @@ AP_PSK=${PSK}
 EOF
 sudo chmod 644 /var/lib/leanframe/setup_ap.env
 
+# --- Avahi (mDNS) advertisement for LeanFrame on _leanframe._tcp:8765 ---
+# Install Avahi if missing
+if ! dpkg -s avahi-daemon >/dev/null 2>&1; then
+  echo "Installing avahi-daemon…"
+  sudo apt-get update -y && sudo apt-get install -y avahi-daemon avahi-utils
+fi
+
+# Make sure Avahi is enabled
+sudo systemctl enable --now avahi-daemon
+
+# Device identity for TXT record (stable, non-secret)
+DEVICE_ID="LF-${ID}"     # e.g., LF-1A2B3C4D from /etc/machine-id first 8 chars
+
+# Create the service file
+sudo mkdir -p /etc/avahi/services
+sudo tee /etc/avahi/services/leanframe.service >/dev/null <<EOF
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name replace-wildcards="yes">LeanFrame %h</name>
+  <service>
+    <type>_leanframe._tcp</type>
+    <port>8765</port>
+    <!-- Keep TXT minimal; do NOT put secrets here -->
+    <txt-record>device_id=${DEVICE_ID}</txt-record>
+    <txt-record>api=/</txt-record>
+    <txt-record>version=1</txt-record>
+  </service>
+</service-group>
+EOF
+
+# Reload Avahi so the announcement goes live
+sudo systemctl reload avahi-daemon || sudo systemctl restart avahi-daemon
+
+# (Optional) If you use UFW, allow mDNS so phones can discover the frame
+if command -v ufw >/dev/null 2>&1; then
+  sudo ufw allow 5353/udp || true
+fi
+
 # --- Install hotspot helper ---
 sudo tee /usr/local/bin/leanframe-ap >/dev/null <<'EOF'
 #!/usr/bin/env bash
