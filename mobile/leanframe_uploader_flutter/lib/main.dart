@@ -938,11 +938,30 @@ enum HubTab { photos, settings}
 class _HomeScreenState extends State<HomeScreen> {
   HubTab tab = HubTab.photos;
 
+  Future<void> _refreshAndDiscover({int tries = 4}) async {
+    final state = InheritedAppState.of(context);
+    for (var i = 0; i < tries; i++) {
+      await autoDiscoverAndConnect(context, timeout: const Duration(seconds: 4));
+      if (!mounted) return;
+      if (state.connected) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Frame found and connected")),
+        );
+        return;
+      }
+      await Future.delayed(const Duration(milliseconds: 350));
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text("No frame discovered on your network")),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = InheritedAppState.of(context);
 
-    // ✅ compute this BEFORE returning the widget tree
+    // compute this BEFORE returning the widget tree
     final bool needsSetup = state.serverBase == null || !state.connected;
 
     return Scaffold(
@@ -974,6 +993,11 @@ class _HomeScreenState extends State<HomeScreen> {
             state.connected ? Icons.circle : Icons.circle_outlined,
             color: state.connected ? Colors.green : Colors.grey,
             size: 12,
+          ),
+          IconButton(
+            tooltip: 'Refresh / discover frame',
+            icon: const Icon(Icons.refresh),
+            onPressed: () => _refreshAndDiscover(),
           ),
           IconButton(
             icon: const Icon(Icons.settings),
@@ -1052,9 +1076,12 @@ class _HomeScreenState extends State<HomeScreen> {
             const _ActivityPlaceholder(),
           const Divider(height: 1),
           Expanded(
-            child: tab == HubTab.photos
-                ? const _PhotoGrid()
-                : const FrameSettingsTab(),
+            child: RefreshIndicator(
+              onRefresh: () => _refreshAndDiscover(),
+              child: tab == HubTab.photos
+                  ? const _PhotoGrid()
+                  : const FrameSettingsTab(),
+            ),
           ),
         ],
       ),
@@ -1246,6 +1273,7 @@ class _PhotoGrid extends StatelessWidget {
     }
     return GridView.builder(
       padding: const EdgeInsets.all(8),
+      physics: const AlwaysScrollableScrollPhysics(),
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 3, mainAxisSpacing: 6, crossAxisSpacing: 6),
       itemCount: state.media.length,
@@ -1322,6 +1350,7 @@ class _FrameSettingsTabState extends State<FrameSettingsTab> {
     super.initState(); 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       autoDiscoverAndConnect(context);
+      //  _refreshAndDiscover(tries: 2);
     });
   }
 
@@ -1441,6 +1470,7 @@ class _FrameSettingsTabState extends State<FrameSettingsTab> {
     }
 
     return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(12, 12, 12, 100),
       children: [
         Text("Render", style: Theme.of(context).textTheme.titleMedium),
@@ -1875,6 +1905,7 @@ Future<bool> _trySetBase(BuildContext context, String base) async {
   } catch (_) {}
   return false;
 }
+
 
 Future<String?> _promptForText(BuildContext context, String title, String initial) async {
   final ctrl = TextEditingController(text: initial);
