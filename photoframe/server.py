@@ -248,6 +248,7 @@ async def put_runtime(payload: Dict[str, Any]):
     # --------- Persist to YAML (preserve other keys) ----------
     data = _load_yaml()
 
+    # render
     data.setdefault("render", {})
     data["render"]["mode"] = mode
     data["render"].setdefault("padding", {})
@@ -255,14 +256,16 @@ async def put_runtime(payload: Dict[str, Any]):
     data["render"]["padding"]["color"] = color
     data["render"]["padding"]["blur_amount"] = blur_amount
 
-    data.setdefault("playback", {})
-    # keep legacy on disk for backward compatibility
-    data["playback"]["slide_duration_s"] = slide_duration_s
-    data["playback"]["default_image_seconds"] = slide_duration_s
-    data["playback"]["crossfade_ms"] = crossfade_ms
-    data["playback"]["transition_crossfade_ms"] = crossfade_ms
-    data["playback"]["shuffle"] = shuffle
-    data["playback"]["loop"] = loop
+    # playback: write ONLY legacy keys expected by PlaybackCfg,
+    # and remove alias duplicates if present.
+    pb = data.setdefault("playback", {})
+    pb["default_image_seconds"] = slide_duration_s
+    pb["transition_crossfade_ms"] = crossfade_ms
+    pb["shuffle"] = shuffle
+    pb["loop"] = loop
+    # remove alias keys that cause duplicates for loaders with aliases
+    pb.pop("slide_duration_s", None)
+    pb.pop("crossfade_ms", None)
 
     _save_yaml(data)
 
