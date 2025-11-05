@@ -32,6 +32,28 @@
 	<string>This app needs access to your Photo Library to upload pictures to your frame.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Wi-Fi onboarding requires temporary location permission.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>This app discovers your LeanFrame on the local network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+	<string>_leanframe._tcp</string>
+	<string>_http._tcp</string>
+	</array>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+	<key>NSAllowsArbitraryLoads</key><true/>
+	<!-- Or, better, use NSExceptionDomains to allow only local IPs/hosts -->
+	</dict>
+
+	<!-- For mDNS / local network scanning and even plain local IP socket access -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>This app connects to your LeanFrame on the local network.</string>
+
+	<!-- If you use Bonsoir/mDNS, list service types -->
+	<key>NSBonjourServices</key>
+	<array>
+	<string>_leanframe._tcp</string>
+	</array>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
