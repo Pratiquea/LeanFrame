@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';    // <-- for Uint8List
+import 'dart:collection';    // <-- for LinkedHashMap
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
