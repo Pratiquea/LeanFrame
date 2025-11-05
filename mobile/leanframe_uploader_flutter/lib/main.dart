@@ -928,7 +928,11 @@ class InheritedAppState extends InheritedNotifier<AppState> {
 /// Home (system picker; new UI tweaks)
 /// ----------------------------------------------------------------------------
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  const HomeScreen({super.key, this.thisdiscoverOverride});
+
+  /// If provided, this is used instead of _refreshAndDiscover().
+  final Future<void> Function()? thisdiscoverOverride;
+
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
@@ -955,6 +959,14 @@ class _HomeScreenState extends State<HomeScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text("No frame discovered on your network")),
     );
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _refreshAndDiscover(tries: 2);
+    });
   }
 
   @override
@@ -995,9 +1007,12 @@ class _HomeScreenState extends State<HomeScreen> {
             size: 12,
           ),
           IconButton(
-            tooltip: 'Refresh / discover frame',
+            tooltip: 'Find connected device',
             icon: const Icon(Icons.refresh),
-            onPressed: () => _refreshAndDiscover(),
+            onPressed: () {
+              final fn = widget.thisdiscoverOverride ?? (() => _refreshAndDiscover());
+              fn();
+            },
           ),
           IconButton(
             icon: const Icon(Icons.settings),
@@ -1027,7 +1042,7 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           const SizedBox(height: 8),
 
-          // ✅ Use collection-if here (no declarations inside the list)
+          // Use collection-if here (no declarations inside the list)
           if (needsSetup)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -1077,7 +1092,10 @@ class _HomeScreenState extends State<HomeScreen> {
           const Divider(height: 1),
           Expanded(
             child: RefreshIndicator(
-              onRefresh: () => _refreshAndDiscover(),
+              onRefresh: () {
+                final fn = widget.thisdiscoverOverride ?? (() => _refreshAndDiscover());
+                return fn();
+              },
               child: tab == HubTab.photos
                   ? const _PhotoGrid()
                   : const FrameSettingsTab(),
