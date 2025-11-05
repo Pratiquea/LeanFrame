@@ -1,8 +1,7 @@
 # photoframe/setup_server.py
 import json, socket, logging, os, time, traceback
 from pathlib import Path
-from turtle import st
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from typing import Dict, Any
@@ -77,6 +76,31 @@ def _connect_with_timeout(ssid: str, pw: str, timeout_s: int = 25) -> bool:
             log.debug(traceback.format_exc())
             return False
 
+def _post_provision_work(ssid, pw):
+    # do the disruptive work AFTER response is sent
+    try:
+        log.info(f"[bg] connecting to Wi-Fi {ssid!r}…")
+        ok = connect_wifi(ssid, pw)
+        log.info(f"[bg] connect_wifi -> {ok}")
+        if not ok:
+            log.error("[bg] connect failed; leaving AP up so user can retry")
+            return
+        stop_hotspot()
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+        except Exception:
+            ip = None
+        log.info(f"[bg] mark_provisioned ip={ip}")
+        mark_provisioned(ip)
+        log.info("[bg] restarting leanframe-switch.service")
+        subprocess.run(["sudo", "systemctl", "restart", "leanframe-switch.service"], check=False)
+    except Exception as e:
+        log.error(f"[bg] post-provision failed: {e}")
+
+
 app = FastAPI(title="LeanFrame Setup")
 
 app.add_middleware(
@@ -85,7 +109,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 @app.get("/pair")
 def get_pair_info():
@@ -113,84 +136,29 @@ def get_pair_info():
      }
 
 @app.post("/provision")
-async def provision(body: Dict[str, Any]):
+async def provision(body: Dict[str, Any], background_tasks: BackgroundTasks):
     """
     Body: { "pair_code": "1234", "wifi": { "ssid": "...", "password": "..." } }
     """
     log.info("POST /provision")
-    log.debug(f"Raw body: {body}")
-
     want_code = str(body.get("pair_code", "")).strip()
     wifi = body.get("wifi") or {}
     ssid = str(wifi.get("ssid", "")).strip()
     pw   = str(wifi.get("password", "")).strip()
 
-    # Redacted view for logs
-    red_pw = ("*" * len(pw)) if pw else "<empty>"
-    log.info(f"Provision request -> SSID={ssid!r}, PASS={red_pw}, pair_code={want_code!r}")
-
     st = current_state()
     have_code = (str(st.get("pair_code", "")) or "").strip()
-    log.debug(f"Device state pair_code={have_code!r}")
 
-    # --- RELAXED: only enforce pair when device actually has one stored
+    # relaxed pair code (only enforce if stored)
     if have_code:
         if not want_code or want_code != have_code:
-            log.warning("Pair code mismatch")
             raise HTTPException(400, "Invalid pair_code")
-    else:
-        log.info("No stored pair_code; skipping validation")
-
     if not ssid or not pw:
-        log.error("Missing wifi.ssid/password in request")
         raise HTTPException(400, "Missing wifi.ssid/password")
 
-    t0 = time.time()
-    log.info(f"Connecting to Wi-Fi SSID={ssid!r}...")
-    # Choose ONE of the following lines:
-    ok = connect_wifi(ssid, pw)                 # direct (original)
-    # ok = _connect_with_timeout(ssid, pw, 25)  # <- enable this if you suspect blocking
-    dt = time.time() - t0
-    log.info(f"connect_wifi returned={ok} in {dt:.1f}s")
-
-    if not ok:
-        log.error("connect_wifi failed (bad credentials or system error)")
-        raise HTTPException(400, "Failed to join Wi-Fi (wrong SSID/password?)")
-
-    # Success: stop AP (systemd) so the frame joins LAN
-    stop_hotspot()
-
-    # figure out a LAN IP to return (best effort)
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        log.info(f"Detected LAN IP after join: {ip}")
-    except Exception as e:
-        ip = None
-        log.warning(f"LAN IP detection failed: {e}")
-        log.debug(traceback.format_exc())
-
-    try:
-        log.info(f"Marking provisioned with ip={ip}")
-        mark_provisioned(ip)
-    except Exception as e:
-        log.error(f"mark_provisioned failed: {e}")
-        log.debug(traceback.format_exc())
-
-    # Immediately flip services to normal mode (no reboot needed)
-    try:
-        log.info("Restarting switcher: sudo systemctl restart leanframe-switch.service")
-        subprocess.run(
-            ["sudo", "systemctl", "restart", "leanframe-switch.service"],
-            check=False,
-        )
-    except Exception as e:
-        log.error(f"Failed to restart leanframe-switch.service: {e}")
-        log.debug(traceback.format_exc())
-
-    return {"ok": True, "lan_ip": ip}
+    # reply first, then flip networks in the background
+    background_tasks.add_task(_post_provision_work, ssid, pw)
+    return {"ok": True, "lan_ip": None}
 
 @app.get("/status")
 def status():
