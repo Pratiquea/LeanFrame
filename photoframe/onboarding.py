@@ -8,7 +8,7 @@ from qrcode.image.pil import PilImage
 
 PAIR_KIND    = "leanframe_setup_v1"
 PROVISION_OK = Path("/var/lib/leanframe/provisioned")
-AP_IP        = os.environ.get("AP_IP", "192.168.42.1")
+AP_IP        = os.environ.get("AP_IP", "192.168.4.1")
 SETUP_BASE   = f"http://{AP_IP}:8765"
 TIMEOUT_SEC  = 15 * 60  # 15 minutes
 ENV_FILE     = Path("/var/lib/leanframe/setup_ap.env")
