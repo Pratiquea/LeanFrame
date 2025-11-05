@@ -10,6 +10,8 @@ import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:wifi_iot/wifi_iot.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:bonsoir/bonsoir.dart';
+import 'package:http/http.dart' as http;
 
 void main() => runApp(const LeanFrameApp());
 
@@ -63,11 +65,15 @@ class Api {
 
   Future<bool> ping() async {
     try {
-      final res = await http
-          .get(Uri.parse(base), headers: _headers)
-          .timeout(const Duration(seconds: 2));
-      return res.statusCode < 500; // 404 on / is fine
-    } catch (_) {
+      final res = await http.get(Uri.parse('$base/config/runtime'), headers: _headers)
+                          .timeout(const Duration(seconds: 3));
+      if (res.statusCode != 200) {
+        debugPrint('Ping failed ${res.statusCode}: ${res.body}');
+        return false;
+      }
+      return true;
+    } catch (e) {
+      debugPrint('Ping exception: $e');
       return false;
     }
   }
@@ -260,6 +266,52 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
   bool _showPass = false;          // 👁 toggle for password field
   String _currSsid = "";           // live device Wi-Fi status
   String _currIp = "";             // live device Wi-Fi status
+  BonsoirDiscovery? _discovery;
+  StreamSubscription<BonsoirDiscoveryEvent>? _discSub;
+
+  Future<void> _discoverFrameAndAutoConnect() async {
+    try {
+      const String serviceType = '_leanframe._tcp'; // <-- match your frame's advertised type
+      final discovery = BonsoirDiscovery(type: serviceType);
+      _discovery = discovery;
+
+      // v6: initialize() replaces the old "ready" getter
+      await discovery.initialize();
+
+      // Listen BEFORE starting
+      _discSub = discovery.eventStream!.listen((event) async {
+        if (event is BonsoirDiscoveryServiceFoundEvent) {
+          // v6: resolve requires a resolver
+          event.service!.resolve(discovery.serviceResolver);
+        } else if (event is BonsoirDiscoveryServiceResolvedEvent) {
+          final s = event.service!;
+          // v6: no "ip" field; use addresses or host
+          final Map<String, dynamic> j = s.toJson();
+          final List addrs = (j['addresses'] as List?) ?? const [];
+          final String host = addrs.isNotEmpty ? addrs.first as String : (s.host ?? '');
+          final int port = s.port ?? 8765;
+          if (host.isEmpty) return;
+
+          final base = 'http://$host:$port';
+          debugPrint('Discovered LeanFrame at $base');
+
+          final app = InheritedAppState.of(context);
+          app.setServer(base: base, token: app.authToken);
+          final ok = await Api(base, app.authToken).ping();
+          app.setConnection(ok);
+
+          // Found one → stop discovery
+          await _discovery?.stop();
+          await _discSub?.cancel();
+        }
+        // Other events (updated/lost) can be ignored for this flow
+      });
+
+      await discovery.start();
+    } catch (e) {
+      debugPrint('mDNS discovery error: $e');
+    }
+  }
 
   Future<void> _readWifiStatus() async {
     try {
@@ -428,7 +480,13 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
   }
 
   @override
-  void dispose() { ssidCtrl.dispose(); passCtrl.dispose(); super.dispose(); }
+  void dispose() {
+    _discSub?.cancel();
+    _discovery?.stop();
+    ssidCtrl.dispose();
+    passCtrl.dispose();
+    super.dispose();
+  }
 
   void _onScan(String qrText) {
     try {
@@ -745,7 +803,11 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
                 }
 
                 if (res.statusCode == 200) {
-                  setState(() => step = 4);
+                  if (mounted) {
+                    setState(() => step = 4);
+                    // Fire and forget: discover the frame on the home network and auto-fill Server URL.
+                    _discoverFrameAndAutoConnect();
+                  }
                 } else {
                   setState(() => error = "Provision failed: ${res.statusCode} ${res.body}");
                 }
@@ -783,6 +845,9 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
   }
 
   Widget _stepDone() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      autoDiscoverAndConnect(context);
+    });
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1253,7 +1318,12 @@ class _FrameSettingsTabState extends State<FrameSettingsTab> {
   }
 
   @override
-  void initState() { super.initState(); }
+  void initState() {
+    super.initState(); 
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      autoDiscoverAndConnect(context);
+    });
+  }
 
 
   @override
@@ -1732,6 +1802,78 @@ class _ServerConfigDialogState extends State<_ServerConfigDialog> {
       ],
     );
   }
+}
+Future<void> autoDiscoverAndConnect(
+  BuildContext context, {
+  Duration timeout = const Duration(seconds: 6),
+}) async {
+  final state = InheritedAppState.of(context);
+
+  // If we already have a working base URL, keep it.
+  if (state.serverBase != null) {
+    try {
+      final ok = await Api(state.serverBase!, state.authToken).ping();
+      if (ok) {
+        state.setConnection(true);
+        return;
+      }
+    } catch (_) {}
+  }
+
+  final discovery = BonsoirDiscovery(type: '_leanframe._tcp');
+
+  // v6: initialize() instead of "ready"
+  await discovery.initialize();
+
+  BonsoirService? chosen;
+
+  // v6: type-checked events instead of BonsoirDiscoveryEventType enum
+  final sub = discovery.eventStream!.listen((event) {
+    if (event is BonsoirDiscoveryServiceFoundEvent) {
+      // v6: resolve requires the resolver from the discovery instance
+      event.service!.resolve(discovery.serviceResolver);
+    } else if (event is BonsoirDiscoveryServiceResolvedEvent) {
+      chosen ??= event.service!;
+    }
+  });
+
+  await discovery.start();
+  await Future<void>.delayed(timeout);
+  await discovery.stop();
+  await sub.cancel();
+
+  if (chosen == null) {
+    // Optional fallback to your known mDNS hostname
+    final guess = 'http://radxa-zero3.local:8765';
+    await _trySetBase(context, guess);
+    return;
+  }
+
+  // v6: no "ip" getter; use addresses/host/port
+  final Map<String, dynamic> j = chosen!.toJson();
+  final List addrs = (j['addresses'] as List?) ?? const [];
+  final String host = addrs.isNotEmpty ? addrs.first as String : (chosen!.host ?? '');
+  final int port = chosen!.port ?? 8765;
+  if (host.isEmpty) return;
+
+  final base = 'http://$host:$port';
+  await _trySetBase(context, base);
+}
+
+Future<bool> _trySetBase(BuildContext context, String base) async {
+  final state = InheritedAppState.of(context);
+  try {
+    final res = await http
+        .get(Uri.parse('$base/config/runtime'),
+             headers: {'X-Auth-Token': state.authToken})
+        .timeout(const Duration(seconds: 3));
+    if (res.statusCode == 200) {
+      state.setServer(base: base, token: state.authToken);
+      state.setConnection(true);
+      return true;
+    }
+  } catch (_) {}
+  return false;
 }
 
 Future<String?> _promptForText(BuildContext context, String title, String initial) async {
