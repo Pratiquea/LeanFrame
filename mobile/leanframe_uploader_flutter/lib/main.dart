@@ -8,6 +8,8 @@ import 'package:http/http.dart' as http;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:wifi_iot/wifi_iot.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 void main() => runApp(const LeanFrameApp());
 
@@ -81,6 +83,88 @@ class Api {
       return false;
     }
   }
+}
+
+class QrParseResult {
+  final String? wifiSsid;
+  final String? wifiPassword;
+  final String? wifiAuth; // WPA/WEP/nopass
+  final bool? wifiHidden;
+  final Uri? setupBase;
+  final Map<String, dynamic>? jsonPayload;
+  QrParseResult({
+    this.wifiSsid,
+    this.wifiPassword,
+    this.wifiAuth,
+    this.wifiHidden,
+    this.setupBase,
+    this.jsonPayload,
+  });
+}
+
+final _wifiRe = RegExp(
+  r'^WIFI:'
+  r'(?:T:(?<T>WPA|WEP|nopass);)?'
+  r'(?:S:(?<S>[^;]*);)?'
+  r'(?:P:(?<P>[^;]*);)?'
+  r'(?:H:(?<H>true|false);)?'
+  r'(?:;)*$',
+);
+
+QrParseResult parseQr(String raw) {
+  final s = raw.trim();
+
+  // 1) WIFI: schema (Android/iOS standard)
+  final m = _wifiRe.firstMatch(s);
+  if (m != null) {
+    final ssid = m.namedGroup('S') ?? '';
+    final pwd  = m.namedGroup('P') ?? '';
+    final auth = m.namedGroup('T') ?? 'WPA';
+    final hid  = (m.namedGroup('H') ?? 'false').toLowerCase() == 'true';
+
+    // Optional: also look for an http URL in the same string (rare, but ok)
+    Uri? setup;
+    try {
+      final maybeUrl = s.split(';').firstWhere(
+        (p) => p.startsWith('http://') || p.startsWith('https://'),
+        orElse: () => '',
+      );
+      setup = maybeUrl.isNotEmpty ? Uri.parse(maybeUrl) : null;
+    } catch (_) {}
+
+    return QrParseResult(
+      wifiSsid: ssid,
+      wifiPassword: pwd,
+      wifiAuth: auth,
+      wifiHidden: hid,
+      setupBase: setup,
+    );
+  }
+
+  // 2) JSON (your legacy/custom payload)
+  try {
+    final obj = jsonDecode(s) as Map<String, dynamic>;
+    // If you want, validate a "kind" discriminator:
+    // if (obj['kind'] != 'leanframe_setup_v1') throw FormatException('wrong kind');
+    final base = (obj['setup_base'] is String) ? Uri.tryParse(obj['setup_base']) : null;
+    return QrParseResult(
+      jsonPayload: obj,
+      setupBase: base,
+      wifiSsid: obj['ap_ssid'],
+      wifiPassword: obj['ap_psk'],
+    );
+  } catch (_) {
+    // fall through
+  }
+
+  // 3) Plain URL (fallback)
+  final u = Uri.tryParse(s);
+  if (u != null && (u.isScheme('http') || u.isScheme('https'))) {
+    return QrParseResult(setupBase: u);
+  }
+
+  // 4) Nothing matched
+  throw FormatException('Invalid QR payload');
 }
 
 class RuntimeConfig {
@@ -169,9 +253,206 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
   bool posting = false;
   bool _handledScan = false; 
   String? error;
+  // Wi-Fi scan + dropdown state 
+  List<WifiNetwork> _nearby = const [];
+  String? _selectedSsid;
+  bool _scanning = false;
+  bool _showPass = false;          // 👁 toggle for password field
+  String _currSsid = "";           // live device Wi-Fi status
+  String _currIp = "";             // live device Wi-Fi status
+
+  Future<void> _readWifiStatus() async {
+    try {
+      final ssid = await WiFiForIoTPlugin.getSSID() ?? "";
+      final ip   = await WiFiForIoTPlugin.getIP() ?? "";
+      setState(() { _currSsid = ssid; _currIp = ip; });
+      debugPrint("Wi-Fi status: ssid='$_currSsid' ip='$_currIp'");
+    } catch (e) {
+      debugPrint("Wi-Fi status error: $e");
+    }
+  }
+
+  /// Try hard to connect to the target AP, and only return true when
+  /// SSID == target and IP looks like 192.168.4.x
+  Future<bool> _connectToApAndVerify({required String targetSsid, required String psk}) async {
+    // Android requirements
+    if (Platform.isAndroid) {
+      final loc = await Permission.location.request();
+      if (!loc.isGranted) {
+        setState(() => error = "Location permission is required to connect Wi-Fi.");
+        return false;
+      }
+      // Ensure Wi-Fi radio is ON
+      if (!await WiFiForIoTPlugin.isEnabled()) {
+        await WiFiForIoTPlugin.setEnabled(true);
+      }
+    }
+
+    // If already on the AP, great
+    await _readWifiStatus();
+    if (_currSsid == targetSsid && _currIp.startsWith("192.168.4.")) {
+      // ensure routing over Wi-Fi for local-only network
+      if (Platform.isAndroid) await WiFiForIoTPlugin.forceWifiUsage(true);
+      return true;
+    }
+
+    // Proactively disconnect from whatever we’re on (some OEMs cling)
+    try { await WiFiForIoTPlugin.disconnect(); } catch (_) {}
+
+    // Ask plugin to connect to our AP
+    final ok = await WiFiForIoTPlugin.connect(
+      targetSsid,
+      password: psk,
+      security: NetworkSecurity.WPA,
+      joinOnce: true,         // don’t persist
+      withInternet: false,    // local-only AP
+    );
+
+    if (!ok) {
+      setState(() => error = "Couldn’t initiate connection to '$targetSsid'. Open Wi-Fi settings and join it, then return.");
+      return false;
+    }
+
+    // Force sockets over this Wi-Fi even without internet
+    if (Platform.isAndroid) {
+      await WiFiForIoTPlugin.forceWifiUsage(true);
+    }
+
+    // Poll until actually connected to the right SSID + IP in 192.168.4.*
+    final good = await _waitForApReady(
+      wantSsid: targetSsid,
+      wantSubnetPrefix: "192.168.4.",
+      maxWait: const Duration(seconds: 25),
+    );
+    await _readWifiStatus(); // update banner
+
+    return good;
+  }
+
+
+  Future<void> _refreshPairFromServer() async {
+    // Must already be connected to the frame AP.
+    final p = payload!;
+    final uri = Uri.parse("${p.setupBase}/pair");
+    try {
+      final res = await http.get(uri).timeout(const Duration(seconds: 4));
+      if (res.statusCode == 200) {
+        final j = json.decode(res.body) as Map<String, dynamic>;
+        final newPair = (j['pair_code'] as String?)?.trim();
+        final dev     = (j['device_id'] as String?)?.trim();
+        if (newPair != null && newPair.isNotEmpty) {
+          // Rebuild payload with the real pair code (keep ssid/psk/setupBase/deviceId best-effort)
+          setState(() {
+            payload = PairPayload(
+              p.ssid,
+              p.psk,
+              newPair,
+              (dev?.isNotEmpty == true ? dev! : p.deviceId),
+              p.setupBase,
+            );
+          });
+        }
+      } else {
+        debugPrint("GET /pair -> ${res.statusCode} ${res.body}");
+      }
+    } catch (e) {
+      debugPrint("GET /pair failed: $e");
+    }
+  }
+
+  Future<bool> _waitForApReady({
+  required String wantSsid,
+  required String wantSubnetPrefix,
+  Duration maxWait = const Duration(seconds: 20),
+  }) async {
+    final t0 = DateTime.now();
+    while (DateTime.now().difference(t0) < maxWait) {
+      try {
+        final ssid = await WiFiForIoTPlugin.getSSID() ?? "";
+        final ip   = await WiFiForIoTPlugin.getIP() ?? "";
+        debugPrint("Wi-Fi status → SSID='$ssid' IP='$ip'");
+
+        final onTarget = ssid == wantSsid && ip.startsWith(wantSubnetPrefix);
+        if (onTarget) return true;
+      } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+    return false;
+  }
+
+  Future<bool> _probeSetupBase(Uri url) async {
+    try {
+      final res = await http.get(url).timeout(const Duration(seconds: 3));
+      debugPrint("Probe ${url} → ${res.statusCode}");
+      return res.statusCode < 500;
+    } catch (e) {
+      debugPrint("Probe error: $e");
+      return false;
+    }
+  }
+
+
+  Future<void> _scanNearbyWifi() async {
+    setState(() { _scanning = true; error = null; });
+    try {
+      // Android 10+: location permission is required to scan Wi-Fi
+      if (Platform.isAndroid) {
+        final st = await Permission.location.request();
+        if (!st.isGranted) {
+          setState(() { error = "Location permission is required to scan nearby Wi-Fi."; _scanning = false; });
+          return;
+        }
+      }
+      final list = await WiFiForIoTPlugin.loadWifiList(); // returns List<WifiNetwork>
+      // De-duplicate by SSID, drop empties
+      final ssids = <String>{};
+      final cleaned = <WifiNetwork>[];
+      for (final w in list) {
+        final s = (w.ssid ?? '').trim();
+        if (s.isEmpty) continue;
+        if (ssids.add(s)) cleaned.add(w);
+      }
+      cleaned.sort((a,b) => (a.level ?? -100).compareTo(b.level ?? -100)); // weak→strong; reverse if you prefer
+      setState(() {
+        _nearby = cleaned.reversed.toList(); // strong→weak
+        // keep previous selection if still visible
+        if (_selectedSsid == null || !_nearby.any((w) => w.ssid == _selectedSsid)) {
+          _selectedSsid = _nearby.isNotEmpty ? _nearby.first.ssid : null;
+        }
+      });
+    } catch (e) {
+      setState(() => error = "Scan error: $e");
+    } finally {
+      if (mounted) setState(() => _scanning = false);
+    }
+  }
 
   @override
   void dispose() { ssidCtrl.dispose(); passCtrl.dispose(); super.dispose(); }
+
+  void _onScan(String qrText) {
+    try {
+      final res = parseQr(qrText);
+
+      final Uri setup = res.setupBase ?? Uri.parse('http://192.168.4.1:8765');
+      final ssid = res.wifiSsid ?? (res.jsonPayload?['ap_ssid'] as String? ?? '');
+      final psk  = res.wifiPassword ?? (res.jsonPayload?['ap_psk'] as String? ?? '');
+      final pair = (res.jsonPayload?['pair_code'] as String?) ?? '0000';
+      final dev  = (res.jsonPayload?['device_id'] as String?) ?? 'unknown';
+
+      if (ssid.isEmpty || psk.isEmpty) {
+        throw const FormatException('QR missing SSID/PSK');
+      }
+
+      setState(() {
+        payload = PairPayload(ssid, psk, pair, dev, setup.toString());
+        _handledScan = true;
+        step = 2; // “Connect to setup Wi-Fi”
+      });
+    } catch (e) {
+      setState(() => error = "Invalid QR: $e");
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -212,25 +493,11 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
       Expanded(
         child: MobileScanner(
           onDetect: (capture) {
-            if (_handledScan) return; // throttle multiple callbacks
-            final b = capture.barcodes.firstOrNull;
-            final raw = b?.rawValue;
-            if (raw == null || raw.isEmpty) {
-              // Ignore frames with no string payload
-              return;
-            }
-            try {
-              final j = json.decode(raw) as Map<String, dynamic>;
-              final p = PairPayload.fromJson(j);     // can throw (we catch below)
-              setState(() {
-                payload = p;
-                _handledScan = true;
-                step = 2;                             // go to “Connect to setup Wi-Fi”
-              });
-            } catch (e) {
-              setState(() => error = "Invalid QR: $e");
-            }
-          },
+          if (_handledScan) return;
+          final raw = capture.barcodes.firstOrNull?.rawValue;
+          if (raw == null || raw.isEmpty) return;
+          _onScan(raw);
+        },
         ),
       ),
       if (error != null)
@@ -257,12 +524,80 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
         Text("Join this temporary Wi-Fi network:\n\nSSID: ${p.ssid}\nPassword: ${p.psk}"),
         const SizedBox(height: 12),
         const Text("After connecting, return to this app."),
+        const SizedBox(height: 12),
+        FilledButton.icon(
+          icon: const Icon(Icons.wifi),
+          label: const Text("Connect now"),
+          onPressed: () async {
+            final p = payload!;
+            setState(() { error = null; });
+
+            final good = await _connectToApAndVerify(targetSsid: p.ssid, psk: p.psk);
+            if (!good) {
+              setState(() => error = "Wi-Fi didn’t fully connect. Check the password on the frame QR or try again.");
+              return;
+            }
+
+            // We should now be on the AP. Double-check the setup server before proceeding.
+            final probe = await _probeSetupBase(Uri.parse("${p.setupBase}/pair"));
+            if (!probe) {
+              setState(() => error = "Connected to '${p.ssid}', but ${p.setupBase} is not reachable. Stay on frame Wi-Fi and retry.");
+              return;
+            }
+
+            // Pull the fresh pair code (in case placeholder)
+            await _refreshPairFromServer();
+
+            if (mounted) setState(() => step = 3);
+          }
+        ),
         const Spacer(),
-        Row(children: [
-          TextButton(onPressed: () => setState(() => step = 1), child: const Text("Back")),
-          const Spacer(),
-          FilledButton(onPressed: () => setState(() => step = 3), child: const Text("I’m connected")),
-        ]),
+        /// Controls + status stacked vertically (no Row here)
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                TextButton(
+                  onPressed: () => setState(() => step = 1),
+                  child: const Text("Back"),
+                ),
+                const Spacer(),
+                FilledButton(
+                  onPressed: () => setState(() => step = 3),
+                  child: const Text("I’m connected"),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.03),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.black12),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text("Phone connection status", style: TextStyle(fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 6),
+                  Text("SSID: ${_currSsid.isEmpty ? '—' : _currSsid}"),
+                  Text("IP:   ${_currIp.isEmpty   ? '—' : _currIp}"),
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: OutlinedButton.icon(
+                      onPressed: _readWifiStatus,
+                      icon: const Icon(Icons.refresh, size: 16),
+                      label: const Text("Refresh"),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
       ]),
     );
   }
@@ -271,33 +606,144 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
     if (payload == null) {
       return _inlineError("Please scan the QR first", backTo: 1);
     }
+    // Best-effort: if we still have a placeholder, refresh pair_code on step entry.
+    if (payload!.pairCode == '0000' || payload!.pairCode.trim().isEmpty) {
+      // fire and forget; UI doesn't block
+      _refreshPairFromServer();
+    }
+
     final p = payload!;
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         const Text("Your home Wi-Fi", style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
         const SizedBox(height: 6),
-        TextField(controller: ssidCtrl, decoration: const InputDecoration(labelText: "Home Wi-Fi SSID")),
-        const SizedBox(height: 8),
-        TextField(controller: passCtrl, decoration: const InputDecoration(labelText: "Password"), obscureText: true),
+
+        //  Android gets a dropdown of nearby SSIDs
+        //  Android gets a dropdown of nearby SSIDs
+        if (Platform.isAndroid) ...[
+          Row(children: [
+            Expanded(
+              child: DropdownButtonFormField<String>(
+                isExpanded: true,
+                value: _selectedSsid,
+                hint: const Text("Select a Wi-Fi network"),
+                items: _nearby.map((w) {
+                  final s = (w.ssid ?? '').trim();
+                  // we already filtered empties in _scanNearbyWifi()
+                  return DropdownMenuItem<String>(
+                    value: s,                      // <- non-null
+                    child: Text(s, overflow: TextOverflow.ellipsis),
+                  );
+                }).toList(),
+                onChanged: (v) => setState(() {
+                  _selectedSsid = v;
+                  if ((v ?? '').isNotEmpty) {
+                    ssidCtrl.text = v!;           // keep the text field in sync
+                  }
+                }),
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.icon(
+              onPressed: _scanning ? null : _scanNearbyWifi,
+              icon: _scanning
+                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Icon(Icons.wifi_find),
+              label: const Text("Scan"),
+            ),
+          ]),
+          const SizedBox(height: 8),
+        ],
+
+
+        // iOS fallback OR manual override: allow entering SSID if needed 
+        if (!Platform.isAndroid) ...[
+          TextField(controller: ssidCtrl, decoration: const InputDecoration(labelText: "Home Wi-Fi SSID")),
+          const SizedBox(height: 8),
+          const Text("Tip: iOS doesn’t permit apps to list nearby SSIDs; enter your network name.", style: TextStyle(fontSize: 12, color: Colors.black54)),
+          const SizedBox(height: 8),
+        ],
+
+        TextField(
+          controller: passCtrl,
+          decoration: InputDecoration(
+            labelText: "Password",
+            suffixIcon: IconButton(
+              tooltip: _showPass ? "Hide password" : "Show password",
+              icon: Icon(_showPass ? Icons.visibility_off : Icons.visibility),
+              onPressed: () => setState(() => _showPass = !_showPass),
+            ),
+          ),
+          obscureText: !_showPass,
+        ),
+
         const SizedBox(height: 12),
+
         if (error != null) Text(error!, style: const TextStyle(color: Colors.red)),
+
         const Spacer(),
         Row(children: [
           TextButton(onPressed: () => setState(() => step = 2), child: const Text("Back")),
           const Spacer(),
           FilledButton.icon(
+            icon: posting
+                ? const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2))
+                : const Icon(Icons.check),
+            label: const Text("Connect"),
             onPressed: posting ? null : () async {
               setState(() { posting = true; error = null; });
+              final p = payload!;
               try {
-                final res = await http.post(
-                  Uri.parse("${p.setupBase}/provision"),
-                  headers: {"Content-Type":"application/json"},
-                  body: json.encode({
-                    "pair_code": p.pairCode,
-                    "wifi": {"ssid": ssidCtrl.text.trim(), "password": passCtrl.text.trim()},
-                  }),
-                );
+                // Make sure we’re still on the AP
+                final probeOk = await _probeSetupBase(Uri.parse("${p.setupBase}/status"));
+                if (!probeOk) {
+                  setState(() => error = "Not connected to the frame’s Wi-Fi. Stay on '${p.ssid}' while provisioning.");
+                  return;
+                }
+
+                // Ensure we have a real pair code (not the "0000" placeholder)
+                if (p.pairCode == '0000' || p.pairCode.trim().isEmpty) {
+                  await _refreshPairFromServer();
+                }
+
+                // Use dropdown on Android; text field elsewhere
+                final homeSsid = Platform.isAndroid ? (_selectedSsid ?? '') : ssidCtrl.text.trim();
+                if (homeSsid.isEmpty) {
+                  setState(() => error = "Please select/enter your home Wi-Fi SSID.");
+                  return;
+                }
+                final payloadBody = {
+                  "pair_code": payload!.pairCode, // may have been updated by _refreshPairFromServer()
+                  "wifi": {"ssid": homeSsid, "password": passCtrl.text.trim()},
+                };
+
+                Future<http.Response> _post() => http
+                    .post(
+                      Uri.parse("${payload!.setupBase}/provision"),
+                      headers: {"Content-Type":"application/json"},
+                      body: json.encode(payloadBody),
+                    )
+                    .timeout(const Duration(seconds: 8));
+
+                http.Response res = await _post();
+
+                // If backend says 400 (e.g., stale/invalid code), fetch new pair_code once and retry once
+                if (res.statusCode == 400) {
+                  await _refreshPairFromServer(); // update payload!.pairCode if changed
+                  final retryBody = {
+                    "pair_code": payload!.pairCode,
+                    "wifi": {"ssid": homeSsid, "password": passCtrl.text.trim()},
+                  };
+                  res = await http
+                      .post(
+                        Uri.parse("${payload!.setupBase}/provision"),
+                        headers: {"Content-Type":"application/json"},
+                        body: json.encode(retryBody),
+                      )
+                      .timeout(const Duration(seconds: 8));
+                }
+
                 if (res.statusCode == 200) {
                   setState(() => step = 4);
                 } else {
@@ -306,15 +752,14 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
               } catch (e) {
                 setState(() => error = "Network error: $e");
               } finally {
-                setState(() => posting = false);
+                if (mounted) setState(() => posting = false);
               }
             },
-            icon: posting ? const SizedBox(width:16,height:16,child:CircularProgressIndicator(strokeWidth:2)) : const Icon(Icons.check),
-            label: const Text("Connect"),
           ),
         ]),
       ]),
     );
+
   }
 
   Widget _inlineError(String msg, {required int backTo}) {
