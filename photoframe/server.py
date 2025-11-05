@@ -170,11 +170,11 @@ async def get_runtime():
             },
         },
         "playback": {
-            # keep compatibility: we accept/write both new+legacy keys on disk
-            "slide_duration_s": float(pb.get("slide_duration_s", pb.get("default_image_seconds", 12.0))),
+            # only support either legacy or alias keys, not both
+            "slide_duration_s": float(pb.get("slide_duration_s", 12.0)),
             "shuffle": bool(pb.get("shuffle", False)),
             "loop": bool(pb.get("loop", True)),
-            "crossfade_ms": int(pb.get("crossfade_ms", pb.get("transition_crossfade_ms", 300))),
+            "crossfade_ms": int(pb.get("crossfade_ms", 300)), 
         },
     }
     return JSONResponse(out)
@@ -256,17 +256,13 @@ async def put_runtime(payload: Dict[str, Any]):
     data["render"]["padding"]["color"] = color
     data["render"]["padding"]["blur_amount"] = blur_amount
 
-    # playback: write ONLY legacy keys expected by PlaybackCfg,
-    # and remove alias duplicates if present.
     pb = data.setdefault("playback", {})
-    pb["default_image_seconds"] = slide_duration_s
+    pb["slide_duration_s"] = slide_duration_s
     # pb["transition_crossfade_ms"] = crossfade_ms
     pb["crossfade_ms"] = crossfade_ms
     pb["shuffle"] = shuffle
     pb["loop"] = loop
     # remove alias keys that cause duplicates for loaders with aliases
-    pb.pop("slide_duration_s", None)
-    pb.pop("crossfade_ms", None)
 
     _save_yaml(data)
 

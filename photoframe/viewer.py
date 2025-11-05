@@ -50,14 +50,14 @@ class Viewer:
             # Playback
             pb = data.get("playback", {})
             if "slide_duration_s" in pb:
-                self.cfg.playback.default_image_seconds = float(pb["slide_duration_s"])
+                self.cfg.playback.slide_duration_s = float(pb["slide_duration_s"])
             if "shuffle" in pb:
                 self.cfg.playback.shuffle = bool(pb["shuffle"])
             if "loop" in pb:
                 self.cfg.playback.loop = bool(pb["loop"])
             if "crossfade_ms" in pb:
                 # you use crossfade only if transitions_crossfade is True
-                self.cfg.playback.transition_crossfade_ms = int(pb["crossfade_ms"])
+                self.cfg.playback.crossfade_ms = int(pb["crossfade_ms"])
                 self.crossfade_ms = int(pb["crossfade_ms"]) if getattr(self.cfg.playback, "transitions_crossfade", False) else 0
 
             # If you cache anything else (e.g., timers), refresh here if needed.
@@ -151,7 +151,7 @@ class Viewer:
             self.screen.fill((0,0,0))
             self.screen.blit(frame, dst_rect.topleft)
             pygame.display.flip()
-            self._sleep_with_events(self.cfg.playback.default_image_seconds)
+            self._sleep_with_events(self.cfg.playback.slide_duration_s)
 
     def _crossfade(self, new_surface: pygame.Surface, dst_rect: pygame.Rect):
         start = pygame.time.get_ticks()
@@ -174,7 +174,7 @@ class Viewer:
                 self.screen.fill((0,0,0))
                 self.screen.blit(new_surface, dst_rect.topleft)
                 pygame.display.flip()
-                self._sleep_with_events(self.cfg.playback.default_image_seconds)
+                self._sleep_with_events(self.cfg.playback.slide_duration_s)
                 break
 
     def _preload_neighbors(self, current_id: int):

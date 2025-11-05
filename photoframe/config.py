@@ -24,7 +24,7 @@ class RenderCfg:
 
 @dataclass
 class PlaybackCfg:
-    default_image_seconds: float = 12.0
+    slide_duration_s: float = 12.0
     shuffle: bool = True
     loop: bool = True
     resume_on_start: bool = True
@@ -114,36 +114,36 @@ class AppCfg:
         # playback
         pb = dict(data.get("playback", {})) or {}
         # If both legacy and new keys exist, keep the legacy ones (or choose one policy)
-        if "default_image_seconds" in pb and "slide_duration_s" in pb:
-            # keep legacy and drop alias
-            pb.pop("slide_duration_s", None)
+        # if "default_image_seconds" in pb and "slide_duration_s" in pb:
+        #     # keep legacy and drop alias
+        #     pb.pop("slide_duration_s", None)
 
-        if "transition_crossfade_ms" in pb and "crossfade_ms" in pb:
-            # keep legacy and drop alias
-            pb.pop("crossfade_ms", None)
+        # if "transition_crossfade_ms" in pb and "crossfade_ms" in pb:
+        #     # keep legacy and drop alias
+        #     pb.pop("crossfade_ms", None)
 
         # OPTIONAL: also coerce types if needed
-        if "default_image_seconds" in pb:
-            try: pb["default_image_seconds"] = float(pb["default_image_seconds"])
-            except Exception: pass
-        if "transition_crossfade_ms" in pb:
-            try: pb["transition_crossfade_ms"] = int(pb["transition_crossfade_ms"])
-            except Exception: pass
+        # if "default_image_seconds" in pb:
+        #     try: pb["default_image_seconds"] = float(pb["default_image_seconds"])
+        #     except Exception: pass
+        # if "transition_crossfade_ms" in pb:
+        #     try: pb["transition_crossfade_ms"] = int(pb["transition_crossfade_ms"])
+        #     except Exception: pass
         if "shuffle" in pb:
             pb["shuffle"] = bool(pb["shuffle"])
         if "loop" in pb:
             pb["loop"] = bool(pb["loop"])
 
-        # # now safe to construct
-        # playback = PlaybackCfg(
-        #     **pb  # or map fields explicitly if your constructor uses different names
-        # )
-        transitions = pb.pop("transitions", {})
+        # now safe to construct
         playback = PlaybackCfg(
-        **pb,
-        transitions_crossfade=bool(transitions.get("crossfade", True)),
-        crossfade_ms=int(transitions.get("crossfade_ms", 350)),
+            **pb  # or map fields explicitly if your constructor uses different names
         )
+        # transitions = pb.pop("transitions", {}) or {}
+        # playback = PlaybackCfg(
+        # **pb,
+        # transitions_crossfade=bool(transitions.get("crossfade", True)),
+        # crossfade_ms=int(transitions.get("crossfade_ms", 350)),
+        # )
 
         p = data["paths"]
         paths = PathsCfg(

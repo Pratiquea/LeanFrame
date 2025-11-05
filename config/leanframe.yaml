@@ -19,7 +19,7 @@ render:
     
 # Playback
 playback:
-  default_image_seconds: 3
+  slide_duration_s: 3
   shuffle: true
   loop: true
   resume_on_start: true
