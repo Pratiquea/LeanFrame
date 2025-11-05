@@ -8,6 +8,94 @@ from typing import Any, Dict, Callable, List
 import yaml
 import threading
 from .config import AppCfg
+from fastapi import Path as FPath
+from fastapi.responses import Response
+from typing import Optional
+from io import BytesIO
+import json
+import os
+import mimetypes
+import math
+from PIL import Image, ImageDraw
+from urllib.parse import quote, unquote
+
+_IMG_EXT = { "jpg","jpeg","png","webp","bmp","heic","heif","dng","tif","tiff","avif" }
+_VID_EXT = { "mp4","mov","m4v","avi","mkv","webm","hevc","heif","heifv" }  # extend as you like
+
+
+def _lib_root() -> Path:
+    assert cfg and cfg.paths and cfg.paths.library, "cfg.paths.library not set"
+    return Path(cfg.paths.library)
+
+def _images_dir() -> Path:
+    return _lib_root() / "images"
+
+def _videos_dir() -> Path:
+    return _lib_root() / "videos"
+
+def _is_image(p: Path) -> bool:
+    return p.suffix.lower().lstrip(".") in _IMG_EXT
+
+def _is_video(p: Path) -> bool:
+    return p.suffix.lower().lstrip(".") in _VID_EXT
+
+def _iter_media() -> list[Path]:
+    items: list[Path] = []
+    for base in (_images_dir(), _videos_dir()):
+        if not base.exists():
+            continue
+        for r, _, files in os.walk(base):
+            for f in files:
+                p = Path(r) / f
+                # only known media
+                if _is_image(p) or _is_video(p):
+                    items.append(p)
+    return items
+
+def _id_from_path(p: Path) -> str:
+    # Stable, URL-safe id relative to library root (posix style)
+    rel = p.relative_to(_lib_root()).as_posix()
+    # keep it readable; only quote unsafe chars
+    return quote(rel, safe="/-._~")
+
+def _path_from_id(item_id: str) -> Path:
+    # Prevent traversal
+    rel = Path(unquote(item_id))
+    if rel.is_absolute() or ".." in rel.parts:
+        raise HTTPException(400, "invalid id")
+    p = _lib_root() / rel
+    try:
+        p.resolve().relative_to(_lib_root().resolve())
+    except Exception:
+        raise HTTPException(400, "invalid id")
+    if not p.exists() or not p.is_file():
+        raise HTTPException(404, "not found")
+    return p
+
+_META_PATH = lambda: _lib_root() / ".meta.json"
+_META_LOCK = threading.RLock()
+
+def _load_meta() -> dict:
+    with _META_LOCK:
+        p = _META_PATH()
+        if not p.exists():
+            return {}
+        try:
+            return json.loads(p.read_text())
+        except Exception:
+            return {}
+
+def _save_meta(d: dict) -> None:
+    with _META_LOCK:
+        p = _META_PATH()
+        p.write_text(json.dumps(d, indent=2, sort_keys=True))
+
+def _file_size(p: Path) -> int:
+    try:
+        return p.stat().st_size
+    except Exception:
+        return 0
+
 
 # Helpers to locate YAML
 def _cfg_yaml_path() -> Path:
@@ -47,25 +135,6 @@ class RuntimeBus:
                 pass
 
 runtime_bus = RuntimeBus()
-
-# ---------- Runtime Config API ----------
-# Shapes we expose:
-# {
-#   "render": {
-#     "mode": "cover" | "contain",
-#     "padding": {
-#       "style": "blur" | "glass" | "solid" | ... (other known styles ok),
-#       "color": "#RRGGBB",
-#       "blur_amount": float >= 0
-#     }
-#   },
-#   "playback": {
-#     "slide_duration_s": float,
-#     "shuffle": bool,
-#     "loop": bool,
-#     "crossfade_ms": int
-#   }
-# }
 
 app = FastAPI(title="LeanFrame Server")
 
@@ -212,3 +281,131 @@ async def put_runtime(payload: Dict[str, Any]):
     })
 
     return JSONResponse({"ok": True})
+
+@app.get("/stats/storage", dependencies=[Depends(auth)])
+async def stats_storage():
+    root = _lib_root()
+    root.mkdir(parents=True, exist_ok=True)
+    # Filesystem totals
+    du = shutil.disk_usage(str(root))
+    total = int(du.total)
+    used_fs = int(du.used)
+
+    # App library breakdown by summing file sizes
+    images_bytes = 0
+    videos_bytes = 0
+    for p in _iter_media():
+        if _is_image(p):
+            images_bytes += _file_size(p)
+        elif _is_video(p):
+            videos_bytes += _file_size(p)
+    # "Other" = everything else used on the FS minus media we know about
+    other_bytes = max(0, used_fs - images_bytes - videos_bytes)
+
+    return JSONResponse({
+        "total_bytes": total,
+        "used_bytes": used_fs,
+        "images_bytes": images_bytes,
+        "videos_bytes": videos_bytes,
+        "other_bytes": other_bytes,
+    })
+
+@app.get("/library", dependencies=[Depends(auth)])
+async def list_library():
+    meta = _load_meta()
+    items = []
+    for p in _iter_media():
+        item = {
+            "id": _id_from_path(p),
+            "kind": "image" if _is_image(p) else "video",
+            "bytes": _file_size(p),
+        }
+        # attach flags if exist
+        if item["id"] in meta:
+            item["flags"] = meta[item["id"]]
+        items.append(item)
+    # newest last modified first (optional)
+    items.sort(key=lambda x: (_lib_root() / unquote(x["id"])).stat().st_mtime if (_lib_root() / unquote(x["id"])).exists() else 0, reverse=True)
+    return JSONResponse({ "items": items })
+
+def _thumb_for_image(p: Path, max_w: int) -> bytes:
+    with Image.open(p) as im:
+        im = im.convert("RGB")
+        # simple contain resize
+        w, h = im.size
+        if w > max_w:
+            new_h = max(1, math.floor(h * (max_w / float(w))))
+            im = im.resize((max_w, new_h), Image.LANCZOS)
+        buf = BytesIO()
+        im.save(buf, format="JPEG", quality=88)
+        return buf.getvalue()
+
+def _thumb_for_video_placeholder(p: Path, max_w: int) -> bytes:
+    # A soft gray rectangle with a play triangle overlay (no ffmpeg dependency)
+    W = max(64, min(720, max_w))
+    H = int(W * 9 / 16)
+    img = Image.new("RGB", (W, H), (200, 205, 210))
+    draw = ImageDraw.Draw(img)
+    # play triangle
+    s = int(min(W, H) * 0.35)
+    cx, cy = W // 2, H // 2
+    tri = [(cx - s//3, cy - s//2), (cx - s//3, cy + s//2), (cx + s//2, cy)]
+    draw.polygon(tri, fill=(255, 255, 255))
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+@app.get("/thumb/{item_id:path}", dependencies=[Depends(auth)])
+async def get_thumb(item_id: str = FPath(..., description="library-relative id"), w: Optional[int] = None):
+    max_w = int(w or 360)
+    p = _path_from_id(item_id)
+    try:
+        if _is_image(p):
+            data = _thumb_for_image(p, max_w)
+            return Response(content=data, media_type="image/jpeg")
+        elif _is_video(p):
+            data = _thumb_for_video_placeholder(p, max_w)
+            return Response(content=data, media_type="image/png")
+        else:
+            raise HTTPException(415, "unsupported media")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"thumb error: {e}")
+
+@app.delete("/library/{item_id:path}", dependencies=[Depends(auth)])
+async def delete_item(item_id: str = FPath(...)):
+    p = _path_from_id(item_id)
+    try:
+        p.unlink(missing_ok=False)
+    except FileNotFoundError:
+        raise HTTPException(404, "not found")
+    except Exception as e:
+        raise HTTPException(500, f"delete failed: {e}")
+    # also prune metadata if present
+    meta = _load_meta()
+    if item_id in meta:
+        del meta[item_id]
+        _save_meta(meta)
+    return JSONResponse({"ok": True})
+
+@app.post("/library/{item_id:path}/flags", dependencies=[Depends(auth)])
+async def set_flags(item_id: str = FPath(...), payload: Dict[str, Any] = None):
+    _ = _path_from_id(item_id)  # validate exists
+    payload = payload or {}
+    include = payload.get("include")
+    exclude = payload.get("exclude_from_shuffle")
+    # both are optional booleans
+    if include is not None and not isinstance(include, bool):
+        raise HTTPException(400, "include must be boolean")
+    if exclude is not None and not isinstance(exclude, bool):
+        raise HTTPException(400, "exclude_from_shuffle must be boolean")
+    meta = _load_meta()
+    rec = meta.get(item_id, {})
+    if include is not None:
+        rec["include"] = include
+    if exclude is not None:
+        rec["exclude_from_shuffle"] = exclude
+    meta[item_id] = rec
+    _save_meta(meta)
+    return JSONResponse({"ok": True, "flags": rec})

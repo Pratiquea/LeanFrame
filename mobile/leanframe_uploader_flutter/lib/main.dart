@@ -25,6 +25,12 @@ class AppState extends ChangeNotifier {
   bool connected = false;
 
   final List<MediaItem> media = [];
+  final List<LibEntry> library = [];
+  void setLibrary(List<LibEntry> items) { library
+    ..clear()
+    ..addAll(items);
+    notifyListeners();
+  }
 
   int get imageCount => media.length;
 
@@ -941,24 +947,31 @@ enum HubTab { photos, settings}
 
 class _HomeScreenState extends State<HomeScreen> {
   HubTab tab = HubTab.photos;
+  StorageStats? _storage;
+  bool _loadingStorage = false;
 
-  Future<void> _refreshAndDiscover({int tries = 4}) async {
-    final state = InheritedAppState.of(context);
-    for (var i = 0; i < tries; i++) {
-      await autoDiscoverAndConnect(context, timeout: const Duration(seconds: 4));
-      if (!mounted) return;
-      if (state.connected) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Frame found and connected")),
-        );
-        return;
+  Future<void> _refreshAndDiscover({int tries = 2}) async {
+    final app = InheritedAppState.of(context);
+    for (int i = 0; i < tries; i++) {
+      await autoDiscoverAndConnect(context);
+      // if (app.serverBase != null && app.connected) break;
+      if (app.serverBase != null && app.connected) {
+        final items = await Api(app.serverBase!, app.authToken).listLibrary();
+        if (mounted) InheritedAppState.of(context).setLibrary(items);
       }
-      await Future.delayed(const Duration(milliseconds: 350));
+      await Future.delayed(const Duration(milliseconds: 400));
     }
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("No frame discovered on your network")),
-    );
+    // fetch storage if we have a server
+    if (app.serverBase != null) {
+      setState(() => _loadingStorage = true);
+      try {
+        final s = await Api(app.serverBase!, app.authToken).getStorageStats();
+        if (mounted) setState(() => _storage = s);
+      } finally {
+        if (mounted) setState(() => _loadingStorage = false);
+      }
+    }
   }
 
   @override
@@ -1062,7 +1075,15 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
-
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: _loadingStorage
+                ? const SizedBox(height: 12, child: LinearProgressIndicator())
+                : (_storage == null
+                    ? const SizedBox(height: 12) // keep layout even if stats missing
+                    : StorageBar(stats: _storage!)),
+          ),
+          
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: LayoutBuilder(
@@ -1309,30 +1330,267 @@ class _ActivityCenter extends StatelessWidget {
   }
 }
 
-class _PhotoGrid extends StatelessWidget {
+class _PhotoGrid extends StatefulWidget {
   const _PhotoGrid();
   @override
-  Widget build(BuildContext context) {
-    final state = InheritedAppState.of(context);
-    if (state.media.isEmpty) {
-      return const Center(child: Text("No photos yet — tap Add Photos to begin."));
+  State<_PhotoGrid> createState() => _PhotoGridState();
+}
+
+class _PhotoGridState extends State<_PhotoGrid> {
+  final _thumbs = ThumbCache(cap: 160);
+  final _loading = <String, bool>{}; // prevent duplicate fetches
+
+  Future<Uint8List?> _ensureThumb(BuildContext ctx, LibEntry e) async {
+    final app = InheritedAppState.of(ctx);
+    final cached = _thumbs.get(e.id);
+    if (cached != null) return cached;
+    if (_loading[e.id] == true) return null;
+    _loading[e.id] = true;
+    try {
+      final b = await Api(app.serverBase!, app.authToken).fetchThumb(e.id, maxW: 360);
+      if (b != null) {
+        _thumbs.put(e.id, b);
+        if (mounted) setState(() {}); // refresh this tile later
+      }
+      return b;
+    } finally {
+      _loading[e.id] = false;
     }
-    return GridView.builder(
-      padding: const EdgeInsets.all(8),
-      physics: const AlwaysScrollableScrollPhysics(),
-      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: 3, mainAxisSpacing: 6, crossAxisSpacing: 6),
-      itemCount: state.media.length,
-      itemBuilder: (_, i) {
-        final m = state.media[i];
+  }
+
+  Future<void> _openActions(BuildContext ctx, LibEntry e) async {
+    final app = InheritedAppState.of(ctx);
+    final api = Api(app.serverBase!, app.authToken);
+    final choice = await showModalBottomSheet<String>(
+      context: ctx,
+      showDragHandle: true,
+      builder: (_) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: const [
+          ListTile(leading: Icon(Icons.delete_outline), title: Text("Remove from frame"),    dense: true),
+          ListTile(leading: Icon(Icons.block),          title: Text("Exclude from shuffle"), dense: true),
+          ListTile(leading: Icon(Icons.check_circle),   title: Text("Include in slideshow"), dense: true),
+          SizedBox(height: 8),
+        ]),
+      ),
+    );
+
+    if (choice == null) return;
+
+    late bool ok;
+    switch (choice) {
+      case "Remove from frame":
+        ok = await api.deleteItem(e.id);
+        if (ok) {
+          final list = [...app.library]..removeWhere((x) => x.id == e.id);
+          app.setLibrary(list);
+          _thumbs.get(e.id); // keep or drop; optional to evict
+        }
+        break;
+      case "Exclude from shuffle":
+        ok = await api.setFlags(e.id, excludeFromShuffle: true);
+        break;
+      case "Include in slideshow":
+        ok = await api.setFlags(e.id, include: true, excludeFromShuffle: false);
+        break;
+      default:
+        return;
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(ctx).showSnackBar(
+      SnackBar(content: Text(ok ? "Done" : "Action failed")),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = InheritedAppState.of(context);
+    final items = app.library;
+    if (app.serverBase == null || !app.connected) {
+      return const Center(child: Text("Not connected. Use the gear to connect or pull to refresh."));
+    }
+    if (items.isEmpty) {
+      return const Center(child: Text("No media on the frame yet."));
+    }
+
+    return RefreshIndicator(
+      onRefresh: () async {
+        await autoDiscoverAndConnect(context);
+        if (app.serverBase != null) {
+          final list = await Api(app.serverBase!, app.authToken).listLibrary();
+          if (mounted) InheritedAppState.of(context).setLibrary(list);
+        }
+      },
+      child: GridView.builder(
+        padding: const EdgeInsets.all(8),
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 3, mainAxisSpacing: 6, crossAxisSpacing: 6),
+        itemCount: items.length,
+        itemBuilder: (_, i) {
+          final e = items[i];
+          final bytes = _thumbs.get(e.id);
+          if (bytes == null) {
+            // Start fetching in background
+            _ensureThumb(context, e);
+          }
+          return GestureDetector(
+            onLongPress: () => _openActions(context, e),
+            onTap: () {
+              // re-use your selection editor flow if needed
+              // or toggle a local selected set (not shown here)
+            },
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                if (bytes == null)
+                  Container(color: Colors.grey.shade300, child: const Center(child: CircularProgressIndicator(strokeWidth: 2)))
+                else
+                  Image.memory(bytes, fit: BoxFit.cover, gaplessPlayback: true, filterQuality: FilterQuality.medium),
+                if (e.isVideo)
+                  const Align(
+                    alignment: Alignment.bottomRight,
+                    child: Padding(
+                      padding: EdgeInsets.all(4),
+                      child: Icon(Icons.play_circle_fill, size: 24, color: Colors.white70),
+                    ),
+                  ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+
+class LibEntry {
+  final String id;
+  final String kind; // "image" | "video" | fallback
+  final int bytes;
+  LibEntry({required this.id, required this.kind, required this.bytes});
+  factory LibEntry.fromJson(Map<String, dynamic> j) => LibEntry(
+    id: j['id'] as String,
+    kind: (j['kind'] as String?) ?? 'other',
+    bytes: (j['bytes'] as int?) ?? 0,
+  );
+  bool get isVideo => kind.toLowerCase() == 'video';
+  bool get isImage => kind.toLowerCase() == 'image';
+}
+
+extension ApiLibrary on Api {
+  Future<List<LibEntry>> listLibrary() async {
+    try {
+      final res = await http.get(Uri.parse("$base/library"), headers: _headers)
+                            .timeout(const Duration(seconds: 5));
+      if (res.statusCode == 200) {
+        final j = json.decode(res.body) as Map<String, dynamic>;
+        final items = (j['items'] as List? ?? const []);
+        return items.map((e) => LibEntry.fromJson(e as Map<String, dynamic>)).toList();
+      }
+    } catch (_) {}
+    return const [];
+  }
+
+  Future<Uint8List?> fetchThumb(String id, {int maxW = 300}) async {
+    try {
+      final res = await http.get(Uri.parse("$base/thumb/$id?w=$maxW"), headers: _headers)
+                            .timeout(const Duration(seconds: 5));
+      if (res.statusCode == 200) return res.bodyBytes;
+    } catch (_) {}
+    return null;
+  }
+
+  Future<bool> deleteItem(String id) async {
+    try {
+      final res = await http.delete(Uri.parse("$base/library/$id"), headers: _headers)
+                            .timeout(const Duration(seconds: 5));
+      return res.statusCode == 200 || res.statusCode == 204;
+    } catch (_) { return false; }
+  }
+
+  Future<bool> setFlags(String id, {bool? include, bool? excludeFromShuffle}) async {
+    try {
+      final body = <String, dynamic>{};
+      if (include != null) body['include'] = include;
+      if (excludeFromShuffle != null) body['exclude_from_shuffle'] = excludeFromShuffle;
+      final res = await http.post(
+        Uri.parse("$base/library/$id/flags"),
+        headers: {..._headers, "Content-Type": "application/json"},
+        body: json.encode(body),
+      ).timeout(const Duration(seconds: 5));
+      return res.statusCode == 200;
+    } catch (_) { return false; }
+  }
+}
+
+// A tiny in-memory LRU for thumbnails (by count, not bytes).
+class ThumbCache {
+  final int cap;
+  final _map = LinkedHashMap<String, Uint8List>();
+  ThumbCache({this.cap = 128});
+  Uint8List? get(String k) {
+    final v = _map.remove(k);
+    if (v != null) _map[k] = v; // move to end
+    return v;
+  }
+  void put(String k, Uint8List v) {
+    if (_map.containsKey(k)) _map.remove(k);
+    _map[k] = v;
+    while (_map.length > cap) {
+      _map.remove(_map.keys.first);
+    }
+  }
+}
+
+class StorageBar extends StatelessWidget {
+  final StorageStats stats;
+  const StorageBar({super.key, required this.stats});
+
+  @override
+  Widget build(BuildContext context) {
+    if (stats.total == 0) return const SizedBox.shrink();
+    final imagesFrac = stats.images / stats.total;
+    final videosFrac = stats.videos / stats.total;
+    final otherFrac  = stats.other  / stats.total;
+
+    // Pastel, high-contrast pair for images/videos + gray for other:
+    const imagesColor = Color(0xFFB3E5FC); // pastel cyan
+    const videosColor = Color(0xFFFFCDD2); // pastel pink
+    const otherColor  = Color(0xFFCFD8DC); // cool gray
+
+    return LayoutBuilder(
+      builder: (context, c) {
+        // Make the bar as wide as your "Add Photos" button (same 16 px page padding)
+        final barHeight = 12.0;
         return Container(
-          color: Colors.grey.shade300,
-          child: const Center(child: Icon(Icons.photo, size: 36, color: Colors.white70)),
+          height: barHeight,
+          decoration: BoxDecoration(
+            color: otherColor,
+            borderRadius: BorderRadius.circular(999),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Row(
+            children: [
+              Flexible(
+                flex: (imagesFrac * 1000).round(),
+                child: Container(color: imagesColor),
+              ),
+              Flexible(
+                flex: (videosFrac * 1000).round(),
+                child: Container(color: videosColor),
+              ),
+              Flexible(
+                flex: (otherFrac  * 1000).round(),
+                child: const SizedBox.shrink(), // already gray background
+              ),
+            ],
+          ),
         );
       },
     );
   }
 }
+
 
 class FrameSettingsTab extends StatefulWidget {
   const FrameSettingsTab({super.key});
@@ -1737,6 +1995,35 @@ class _FrameSettingsTabState extends State<FrameSettingsTab> {
     final argb = c.toARGB32();          // 0xAARRGGBB
     final rgb  = argb & 0x00FFFFFF;     // strip alpha
     return "#${rgb.toRadixString(16).padLeft(6, '0').toUpperCase()}";
+  }
+}
+/// ----------------------------------------------------------------------------
+/// Storage stats model 
+/// ----------------------------------------------------------------------------
+class StorageStats {
+  final int total, images, videos, other;
+  StorageStats({required this.total, required this.images, required this.videos, required this.other});
+    factory StorageStats.fromJson(Map<String, dynamic> j) {
+    final total = (j['total_bytes'] ?? 0) as int;
+    final used  = (j['used_bytes']  ?? 0) as int;
+    final images = (j['images_bytes'] ?? 0) as int;
+    final videos = (j['videos_bytes'] ?? 0) as int;
+    final other  = (j['other_bytes']  ?? (used - images - videos)) as int;
+    return StorageStats(total: total, images: images, videos: videos, other: other);
+  }
+}
+
+extension ApiStorage on Api {
+  // Backend: GET /stats/storage -> {"total_bytes":..., "images_bytes":..., "videos_bytes":..., "other_bytes":...}
+  Future<StorageStats?> getStorageStats() async {
+    try {
+      final res = await http.get(Uri.parse("$base/stats/storage"), headers: _headers)
+                            .timeout(const Duration(seconds: 3));
+      if (res.statusCode == 200) {
+        return StorageStats.fromJson(json.decode(res.body));
+      }
+    } catch (_) {}
+    return null; // gracefully hide if backend doesn’t have it
   }
 }
 
