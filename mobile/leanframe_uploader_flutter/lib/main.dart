@@ -1237,9 +1237,20 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     }
     if (!mounted) return;
+    // immediately refresh the on-device library so the grid updates
+    try {
+      // tiny delay helps if the backend needs a beat to index the uploads
+      await Future.delayed(const Duration(milliseconds: 250));
+      final fresh = await api.listLibrary();
+      InheritedAppState.of(context).setLibrary(fresh); // triggers grid rebuild
+    } catch (_) {
+      // ignore; fall back to periodic poll or manual refresh
+    }
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text("Uploaded $ok file(s)${fail > 0 ? ", $fail failed" : ""}")),
     );
+
   }
 }
 
@@ -1451,11 +1462,6 @@ class _PhotoGridState extends State<_PhotoGrid> {
       builder: (_) => SafeArea(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           ListTile(
-            leading: const Icon(Icons.delete_outline), dense: true,
-            title: const Text("Remove from frame"),
-            onTap: () => Navigator.pop(ctx, "Remove from frame"),
-          ),
-          ListTile(
             leading: const Icon(Icons.block), dense: true,
             title: const Text("Exclude from shuffle"),
             onTap: () => Navigator.pop(ctx, "Exclude from shuffle"),
@@ -1464,6 +1470,12 @@ class _PhotoGridState extends State<_PhotoGrid> {
             leading: const Icon(Icons.check_circle), dense: true,
             title: const Text("Include in slideshow"),
             onTap: () => Navigator.pop(ctx, "Include in slideshow"),
+          ),
+          ListTile(
+            leading: const Icon(Icons.delete_outline,color: Colors.red), dense: true,
+            title: const Text("Remove from frame",
+              style: TextStyle(color: Colors.red, fontWeight: FontWeight.w600)),
+            onTap: () => Navigator.pop(ctx, "Remove from frame"),
           ),
           const SizedBox(height: 8),
         ]),
@@ -1475,6 +1487,8 @@ class _PhotoGridState extends State<_PhotoGrid> {
     late bool ok;
     switch (choice) {
       case "Remove from frame":
+        final sure = await _confirmDelete(ctx, count: 1);
+        if (!sure) return;
         ok = await api.deleteItem(e.id);
         if (ok) {
           final list = [...app.library]..removeWhere((x) => x.id == e.id);
@@ -2408,25 +2422,31 @@ class _SelectionEditorState extends State<SelectionEditor> {
                       builder: (_) => SafeArea(
                         child: Column(mainAxisSize: MainAxisSize.min, children: [
                           ListTile(
-                            leading: const Icon(Icons.slideshow),
-                            title: const Text("Include in slideshow"),
-                            onTap: () => Navigator.pop(context, "include"),
-                          ),
-                          ListTile(
                             leading: const Icon(Icons.block),
                             title: const Text("Exclude from slideshow"),
                             onTap: () => Navigator.pop(context, "exclude"),
                           ),
                           ListTile(
-                            leading: const Icon(Icons.delete_outline),
-                            title: const Text("Remove from frame"),
+                            leading: const Icon(Icons.slideshow),
+                            title: const Text("Include in slideshow"),
+                            onTap: () => Navigator.pop(context, "include"),
+                          ),
+                          ListTile(
+                            leading: const Icon(Icons.delete_outline, color: Colors.red),
+                            title: const Text("Remove from frame",
+                                style: TextStyle(color: Colors.red, fontWeight: FontWeight.w600)),
                             onTap: () => Navigator.pop(context, "remove"),
                           ),
                           const SizedBox(height: 8),
                         ]),
                       ),
                     );
-                    if (action != null) _doBulkAction(action);
+                    if (action == null) return;
+                    if (action == "remove") {
+                      final sure = await _confirmDelete(context, count: selected.length);
+                      if (!sure) return;
+                    }
+                    _doBulkAction(action);
                   },
             child: Text(
               "Next",
@@ -2515,7 +2535,7 @@ class _SelectionActionsSheet extends StatelessWidget {
           subtitle: Text("Keep on device but skip during shuffle"),
         ),
         ListTile(
-          leading: Icon(Icons.delete_outline),
+          leading: Icon(Icons.delete_outline, color: Colors.red),
           title: Text("Remove from frame"),
         ),
         SizedBox(height: 8),
@@ -2670,4 +2690,24 @@ Future<String?> _promptForText(BuildContext context, String title, String initia
       ],
     ),
   );
+}
+
+Future<bool> _confirmDelete(BuildContext context, {int count = 1}) async {
+  final plural = count > 1 ? "items" : "item";
+  return (await showDialog<bool>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text("Remove from frame?"),
+          content: Text("This will remove $count $plural from the frame."),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Cancel")),
+            FilledButton.tonal(
+              style: FilledButton.styleFrom(foregroundColor: Colors.red),
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text("Remove"),
+            ),
+          ],
+        ),
+      )) ??
+      false;
 }
