@@ -16,7 +16,7 @@ import 'package:bonsoir/bonsoir.dart';
 import 'package:http/http.dart' as http;
 
 void main() => runApp(const LeanFrameApp());
-
+final appStateSingleton = AppState();
 /// ----------------------------------------------------------------------------
 /// App State & API
 /// ----------------------------------------------------------------------------
@@ -279,6 +279,7 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
 
   Future<void> _discoverFrameAndAutoConnect() async {
     try {
+      // final app = InheritedAppState.maybeOf(context) ?? appStateSingleton;
       const String serviceType = '_leanframe._tcp'; // <-- match your frame's advertised type
       final discovery = BonsoirDiscovery(type: serviceType);
       _discovery = discovery;
@@ -919,7 +920,7 @@ class LeanFrameApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData(colorSchemeSeed: Colors.amber, useMaterial3: true),
       home: InheritedAppState(
-        notifier: AppState(),
+        notifier: appStateSingleton,
         child: const HomeScreen(),
       ),
     );
@@ -927,10 +928,27 @@ class LeanFrameApp extends StatelessWidget {
 }
 
 class InheritedAppState extends InheritedNotifier<AppState> {
-  const InheritedAppState({super.key, required super.notifier, required super.child});
-  static AppState of(BuildContext context) =>
-      context.dependOnInheritedWidgetOfExactType<InheritedAppState>()!.notifier!;
+  const InheritedAppState({
+    super.key,
+    required super.notifier,
+    required super.child,
+  });
+
+  /// Non-listening lookup. Useful in async callbacks when widget may be gone.
+  static AppState? maybeOf(BuildContext context) {
+    final inh = context.getElementForInheritedWidgetOfExactType<InheritedAppState>()
+        ?.widget as InheritedAppState?;
+    return inh?.notifier;
+  }
+
+  /// Listening lookup (rebuilds on changes). Falls back to global singleton.
+  static AppState of(BuildContext context) {
+    final n = context.dependOnInheritedWidgetOfExactType<InheritedAppState>()
+        ?.notifier;
+    return n ?? appStateSingleton;
+  }
 }
+
 
 /// ----------------------------------------------------------------------------
 /// Home (system picker; new UI tweaks)
@@ -1301,17 +1319,24 @@ class _PhotosHeaderRow extends StatelessWidget {
         children: [
           Text("Photos ($count)", style: const TextStyle(fontWeight: FontWeight.w600)),
           const Spacer(),
-          OutlinedButton.icon(
-            onPressed: () {
-              Navigator.of(context).push(
-                MaterialPageRoute(
-                  builder: (_) => SelectionEditor(entries: List.of(state.library)),
-                ),
-              );
-            },
-            icon: const Icon(Icons.check_box),
-            label: const Text("Select"),
-          ),
+          Tooltip(
+            message: (!state.connected)
+                ? "Connect to your frame first"
+                : (state.library.isEmpty ? "No items to select" : ""),
+            child: OutlinedButton.icon(
+              onPressed: (state.connected && state.library.isNotEmpty)
+                  ? () {
+                      Navigator.of(context).push(
+                        MaterialPageRoute(
+                          builder: (_) => SelectionEditor(entries: List.of(state.library)),
+                        ),
+                      );
+                    }
+                  : null, // disabled if not connected or no items
+              icon: const Icon(Icons.check_box),
+              label: const Text("Select"),
+            )
+          )
         ],
       ),
     );
@@ -1400,7 +1425,7 @@ class _PhotoGridState extends State<_PhotoGrid> {
   }
 
   Future<Uint8List?> _ensureThumb(BuildContext ctx, LibEntry e) async {
-    final app = InheritedAppState.of(ctx);
+    final app = InheritedAppState.maybeOf(ctx) ?? appStateSingleton;
     final cached = _thumbs.get(e.id);
     if (cached != null) return cached;
     if (_loading[e.id] == true) return null;
@@ -1418,7 +1443,7 @@ class _PhotoGridState extends State<_PhotoGrid> {
   }
 
   Future<void> _openActions(BuildContext ctx, LibEntry e) async {
-    final app = InheritedAppState.of(ctx);
+    final app = InheritedAppState.maybeOf(ctx) ?? appStateSingleton;
     final api = Api(app.serverBase!, app.authToken);
     final choice = await showModalBottomSheet<String>(
       context: ctx,
@@ -2288,100 +2313,171 @@ extension ApiRev on Api {
 class SelectionEditor extends StatefulWidget {
   final List<LibEntry> entries;
   const SelectionEditor({super.key, required this.entries});
+
   @override
   State<SelectionEditor> createState() => _SelectionEditorState();
 }
 
 class _SelectionEditorState extends State<SelectionEditor> {
   final Set<String> selected = {};
+  final Map<String, Uint8List> _thumbs = {};
+  final Set<String> _loading = {};
+
+  Future<void> _loadThumb(String id) async {
+    if (_thumbs.containsKey(id) || _loading.contains(id)) return;
+    _loading.add(id);
+    try {
+      final app = InheritedAppState.maybeOf(context) ?? appStateSingleton;
+      if (app.serverBase == null) return;
+      final b = await Api(app.serverBase!, app.authToken).fetchThumb(id, maxW: 360);
+      if (b != null && mounted) setState(() => _thumbs[id] = b);
+    } finally {
+      _loading.remove(id);
+    }
+  }
+
+  Future<void> _doBulkAction(String action) async {
+    final app = InheritedAppState.maybeOf(context) ?? appStateSingleton;
+    if (app.serverBase == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Not connected. Open the gear and connect to your frame.")),
+      );
+      return;
+    }
+    final api = Api(app.serverBase!, app.authToken);
+
+    int ok = 0, fail = 0;
+    for (final id in selected.toList()) {
+      bool res = true;
+      switch (action) {
+        case "include":
+          res = await api.setFlags(id, include: true, excludeFromShuffle: false);
+          break;
+        case "exclude":
+          res = await api.setFlags(id, excludeFromShuffle: true);
+          break;
+        case "remove":
+          res = await api.deleteItem(id);
+          if (res) {
+            widget.entries.removeWhere((e) => e.id == id);
+            _thumbs.remove(id);
+          }
+          break;
+      }
+      res ? ok++ : fail++;
+    }
+
+    if (!mounted) return;
+    setState(() => selected.clear());
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text("Done: $ok${fail > 0 ? " failed: $fail" : ""}")),
+    );
+    Navigator.pop(context); // back to grid
+    // (only if still mounted & connected)
+    if (app.serverBase != null) {
+      final items = await Api(app.serverBase!, app.authToken).listLibrary();
+      if (context.mounted) InheritedAppState.of(context).setLibrary(items);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final items = widget.entries;
-    final app = InheritedAppState.of(context);
-    final api = Api(app.serverBase!, app.authToken);
 
     return Scaffold(
       appBar: AppBar(
-        leading: TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
+        leadingWidth: 92, // ← gives "Cancel" enough room (no wrap)
+        leading: TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text(
+            "Cancel",
+            softWrap: false,
+            maxLines: 1,
+          ),
+        ),
         title: Text("${selected.length} selected"),
         actions: [
           TextButton(
-            onPressed: selected.isEmpty ? null : () async {
-              final choice = await showModalBottomSheet<String>(
-                context: context,
-                showDragHandle: true,
-                builder: (_) => SafeArea(
-                  child: Column(mainAxisSize: MainAxisSize.min, children: [
-                    ListTile(
-                      leading: const Icon(Icons.slideshow),
-                      title: const Text("Include in slideshow"),
-                      onTap: () => Navigator.pop(context, "include"),
-                    ),
-                    ListTile(
-                      leading: const Icon(Icons.block),
-                      title: const Text("Exclude from slideshow"),
-                      onTap: () => Navigator.pop(context, "exclude"),
-                    ),
-                    ListTile(
-                      leading: const Icon(Icons.delete_outline),
-                      title: const Text("Remove from frame"),
-                      onTap: () => Navigator.pop(context, "remove"),
-                    ),
-                    const SizedBox(height: 8),
-                  ]),
-                ),
-              );
-              if (choice == null) return;
-              // Apply choice to all selected items
-              int ok = 0, fail = 0;
-              for (final id in selected) {
-                late bool res;
-                switch (choice) {
-                  case "include":
-                    res = await api.setFlags(id, include: true, excludeFromShuffle: false);
-                    break;
-                  case "exclude":
-                    res = await api.setFlags(id, excludeFromShuffle: true);
-                    break;
-                  case "delete":
-                    res = await api.deleteItem(id);
-                    if (res) {
-                      // reflect removal locally
-                      widget.entries.removeWhere((e) => e.id == id);
-                    }
-                    break;
-                  default: res = true;
-                }
-                res ? ok++ : fail++;
-              }
-              if (!mounted) return;
-              setState(() {selected.clear();});
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text("Done: $ok${fail>0? " failed: $fail": ""}")),
-              );
-              // Also refresh home's library when we pop back
-              if (mounted) Navigator.pop(context);
-            },
-            child: Text("Next", style: TextStyle(color: selected.isEmpty ? Colors.grey : Colors.blue)),
+            onPressed: selected.isEmpty
+                ? null
+                : () async {
+                    final action = await showModalBottomSheet<String>(
+                      context: context,
+                      showDragHandle: true,
+                      builder: (_) => SafeArea(
+                        child: Column(mainAxisSize: MainAxisSize.min, children: [
+                          ListTile(
+                            leading: const Icon(Icons.slideshow),
+                            title: const Text("Include in slideshow"),
+                            onTap: () => Navigator.pop(context, "include"),
+                          ),
+                          ListTile(
+                            leading: const Icon(Icons.block),
+                            title: const Text("Exclude from slideshow"),
+                            onTap: () => Navigator.pop(context, "exclude"),
+                          ),
+                          ListTile(
+                            leading: const Icon(Icons.delete_outline),
+                            title: const Text("Remove from frame"),
+                            onTap: () => Navigator.pop(context, "remove"),
+                          ),
+                          const SizedBox(height: 8),
+                        ]),
+                      ),
+                    );
+                    if (action != null) _doBulkAction(action);
+                  },
+            child: Text(
+              "Next",
+              style: TextStyle(color: selected.isEmpty ? Colors.grey : Colors.blue),
+            ),
           ),
         ],
       ),
       body: GridView.builder(
         padding: const EdgeInsets.all(8),
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, mainAxisSpacing: 6, crossAxisSpacing: 6),
+        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          crossAxisCount: 3, mainAxisSpacing: 6, crossAxisSpacing: 6),
         itemCount: items.length,
         itemBuilder: (_, i) {
           final e = items[i];
           final isSel = selected.contains(e.id);
+          final b = _thumbs[e.id];
+
+          if (b == null) _loadThumb(e.id);
+
           return GestureDetector(
             onTap: () {
-              setState(() { isSel ? selected.remove(e.id) : selected.add(e.id); });
+              setState(() {
+                isSel ? selected.remove(e.id) : selected.add(e.id);
+              });
             },
             child: Stack(
               fit: StackFit.expand,
               children: [
-                // thumbnail view (reuse same look as grid)
-                Container(color: Colors.grey.shade300, child: const Center(child: Icon(Icons.photo, color: Colors.white70))),
+                if (b == null)
+                  Container(
+                    color: Colors.grey.shade300,
+                    child: const Center(
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  )
+                else
+                  Image.memory(
+                    b,
+                    fit: BoxFit.cover,
+                    gaplessPlayback: true,
+                    filterQuality: FilterQuality.medium,
+                  ),
+                if (e.isVideo)
+                  const Align(
+                    alignment: Alignment.bottomRight,
+                    child: Padding(
+                      padding: EdgeInsets.all(4),
+                      child: Icon(Icons.play_circle_fill, size: 20, color: Colors.white70),
+                    ),
+                  ),
                 if (isSel)
                   Container(
                     color: Colors.black26,
@@ -2400,18 +2496,34 @@ class _SelectionEditorState extends State<SelectionEditor> {
 
 class _SelectionActionsSheet extends StatelessWidget {
   const _SelectionActionsSheet();
+
   @override
   Widget build(BuildContext context) {
     return SafeArea(
       child: Column(mainAxisSize: MainAxisSize.min, children: const [
-        ListTile(leading: Icon(Icons.slideshow), title: Text("Include in slideshow")),
-        ListTile(leading: Icon(Icons.block), title: Text("Exclude from slideshow")),
-        ListTile(leading: Icon(Icons.delete_outline), title: Text("Remove from frame")),
+        ListTile(
+          leading: Icon(Icons.slideshow),
+          title: Text("Include in slideshow"),
+          // return key "include"
+          subtitle: Text("Add to slideshow and allow shuffle"),
+          // Using InkWell via ListTile tap:
+          // We'll pop with "include" in onTap via a wrapper below
+        ),
+        ListTile(
+          leading: Icon(Icons.block),
+          title: Text("Exclude from slideshow"),
+          subtitle: Text("Keep on device but skip during shuffle"),
+        ),
+        ListTile(
+          leading: Icon(Icons.delete_outline),
+          title: Text("Remove from frame"),
+        ),
         SizedBox(height: 8),
       ]),
     );
   }
 }
+
 
 /// ----------------------------------------------------------------------------
 /// Small UI helpers
