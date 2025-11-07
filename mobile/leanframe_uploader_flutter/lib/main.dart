@@ -34,7 +34,7 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  int get imageCount => media.length;
+  int get imageCount => library.length;
 
   void setServer({required String base, required String token}) {
     serverBase = base.trim();
@@ -1294,6 +1294,7 @@ class _PhotosHeaderRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final state = InheritedAppState.of(context);
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
       child: Row(
@@ -1302,7 +1303,11 @@ class _PhotosHeaderRow extends StatelessWidget {
           const Spacer(),
           OutlinedButton.icon(
             onPressed: () {
-              Navigator.of(context).push(MaterialPageRoute(builder: (_) => const SelectionEditor()));
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => SelectionEditor(entries: List.of(state.library)),
+                ),
+              );
             },
             icon: const Icon(Icons.check_box),
             label: const Text("Select"),
@@ -1341,6 +1346,58 @@ class _PhotoGrid extends StatefulWidget {
 class _PhotoGridState extends State<_PhotoGrid> {
   final _thumbs = ThumbCache(cap: 160);
   final _loading = <String, bool>{}; // prevent duplicate fetches
+  Timer? _pollTimer;
+  int? _rev; // last seen
+
+  @override
+  void initState() {
+    super.initState();
+    _startPolling();
+  }
+
+  @override
+  void dispose() {
+    _pollTimer?.cancel();
+    super.dispose();
+  }
+
+  void _startPolling() {
+    _pollTimer?.cancel();
+    _pollTimer = Timer.periodic(const Duration(seconds: 5), (_) => _checkForChanges());
+  }
+
+  Future<void> _checkForChanges() async {
+    final app = InheritedAppState.of(context);
+    if (app.serverBase == null || !app.connected) return;
+    final api = Api(app.serverBase!, app.authToken);
+
+    final rev = await api.getLibraryRev();
+    if (rev == null) return;
+
+    if (_rev == null) {
+      _rev = rev; // prime without fetch
+      return;
+    }
+    if (rev == _rev) return;
+
+    // rev changed -> fetch listing silently, diff, update
+    final list = await api.listLibrary();
+    if (!mounted) return;
+
+    // compute diff against app.library
+    final old = { for (final e in app.library) e.id : e };
+    final now = { for (final e in list) e.id : e };
+
+    // removed
+    for (final id in old.keys) {
+      if (!now.containsKey(id)) {
+        _thumbs.get(id); // optional: evict or keep; no-op here
+      }
+    }
+
+    InheritedAppState.of(context).setLibrary(list);
+    _rev = rev;
+  }
 
   Future<Uint8List?> _ensureThumb(BuildContext ctx, LibEntry e) async {
     final app = InheritedAppState.of(ctx);
@@ -1367,11 +1424,23 @@ class _PhotoGridState extends State<_PhotoGrid> {
       context: ctx,
       showDragHandle: true,
       builder: (_) => SafeArea(
-        child: Column(mainAxisSize: MainAxisSize.min, children: const [
-          ListTile(leading: Icon(Icons.delete_outline), title: Text("Remove from frame"),    dense: true),
-          ListTile(leading: Icon(Icons.block),          title: Text("Exclude from shuffle"), dense: true),
-          ListTile(leading: Icon(Icons.check_circle),   title: Text("Include in slideshow"), dense: true),
-          SizedBox(height: 8),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            leading: const Icon(Icons.delete_outline), dense: true,
+            title: const Text("Remove from frame"),
+            onTap: () => Navigator.pop(ctx, "Remove from frame"),
+          ),
+          ListTile(
+            leading: const Icon(Icons.block), dense: true,
+            title: const Text("Exclude from shuffle"),
+            onTap: () => Navigator.pop(ctx, "Exclude from shuffle"),
+          ),
+          ListTile(
+            leading: const Icon(Icons.check_circle), dense: true,
+            title: const Text("Include in slideshow"),
+            onTap: () => Navigator.pop(ctx, "Include in slideshow"),
+          ),
+          const SizedBox(height: 8),
         ]),
       ),
     );
@@ -1548,47 +1617,207 @@ class StorageBar extends StatelessWidget {
   final StorageStats stats;
   const StorageBar({super.key, required this.stats});
 
+  // Soft, high-contrast pastels (match your existing palette)
+  static const _imagesColor = Color(0xFF00C194); // cyan
+  static const _videosColor = Color(0xFFFF5591); // pink
+  static const _otherColor  = Color.fromARGB(255, 190, 190, 190); // Light gray
+  // static const _freeColor   = Color(0xFFE0F2F1); // Ligher gray(free)
+  static const _freeColor   = Color(0xFFF5F5F5); // Ligher gray(free)
+
+
+  // Format bytes -> MB/GB with 1 decimal place (GB preferred, else MB)
+  String _fmtBytes(int bytes) {
+    if (bytes <= 0) return "0 MB";
+    final gb = bytes / (1024 * 1024 * 1024);
+    if (gb >= 1) return "${gb.toStringAsFixed(1)} GB";
+    final mb = bytes / (1024 * 1024);
+    return "${mb.toStringAsFixed(1)} MB";
+  }
+
   @override
   Widget build(BuildContext context) {
-    if (stats.total == 0) return const SizedBox.shrink();
-    final imagesFrac = stats.images / stats.total;
-    final videosFrac = stats.videos / stats.total;
-    final otherFrac  = stats.other  / stats.total;
+    final int total = stats.total;
+    final int img   = stats.images.clamp(0, total);
+    final int vid   = stats.videos.clamp(0, total);
+    final int oth   = stats.other.clamp(0, total);
+    final int used = (img + vid + oth).clamp(0, total);
+    final int free = (total - used).clamp(0, total);
 
-    // Pastel, high-contrast pair for images/videos + gray for other:
-    const imagesColor = Color(0xFFB3E5FC); // pastel cyan
-    const videosColor = Color(0xFFFFCDD2); // pastel pink
-    const otherColor  = Color(0xFFCFD8DC); // cool gray
+    final totalLabel = "Total: ${_fmtBytes(total)}";
 
-    return LayoutBuilder(
-      builder: (context, c) {
-        // Make the bar as wide as your "Add Photos" button (same 16 px page padding)
-        final barHeight = 12.0;
-        return Container(
-          height: barHeight,
+    if (total == 0) {
+      // Graceful empty state
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _Header(totalLabel: totalLabel),
+          const SizedBox(height: 8),
+          _EmptyBar(),
+          const SizedBox(height: 8),
+          _Legend(img: 0, vid: 0, oth: 0, free: 0, fmt: _fmtBytes),
+        ],
+      );
+    }
+
+    // ---- Compute proportional flex with a minimum for visibility ----
+    // Scale for Flex math (bigger = smoother proportions)
+    const scale = 1000;
+    // Minimum visual segment for non-zero images/videos (~2% each)
+    const minFlexUnit = 20;
+
+    int prop(int part) => ((part / total) * scale).round();
+
+    int imgFlex = img > 0 ? prop(img) : 0;
+    int vidFlex = vid > 0 ? prop(vid) : 0;
+    int othFlex  = oth > 0? prop(oth) : 0;
+    int freeFlex   = free > 0 ? prop(free) : 0;
+
+    // Enforce minimums on images/videos if they’re non-zero
+    if (img > 0 && imgFlex < minFlexUnit) imgFlex = minFlexUnit;
+    if (vid > 0 && vidFlex < minFlexUnit) vidFlex = minFlexUnit;
+
+    // Rebalance "other" to keep total == scale
+    int sum = imgFlex + vidFlex + othFlex + freeFlex;
+
+    if (sum != scale) {
+      // Put the remainder mostly into FREE first (so free visibly expands),
+      // then into OTHER; if negative, take from OTHER then FREE.
+      int delta = scale - sum;
+      if (delta > 0) {
+        final giveFree = delta ~/ 2;
+        freeFlex += giveFree;
+        othFlex  += (delta - giveFree);
+      } else if (delta < 0) {
+        int need = -delta;
+        final takeFromOth  = (othFlex - 0).clamp(0, need);
+        othFlex -= takeFromOth; need -= takeFromOth;
+        if (need > 0) {
+          final takeFromFree = (freeFlex - 0).clamp(0, need);
+          freeFlex -= takeFromFree; need -= takeFromFree;
+        }
+        // If still need > 0 (extreme tiny totals), trim from vid then img but keep >=1
+        if (need > 0) {
+          final takeFromVid = (vidFlex - 1).clamp(0, need);
+          vidFlex -= takeFromVid; need -= takeFromVid;
+        }
+        if (need > 0) {
+          final takeFromImg = (imgFlex - 1).clamp(0, need);
+          imgFlex -= takeFromImg; need -= takeFromImg;
+        }
+      }
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _Header(totalLabel: totalLabel),
+        const SizedBox(height: 8),
+        // Full stacked bar: Images | Videos | Other | Free  == Total
+        Container(
+          height: 12,
           decoration: BoxDecoration(
-            color: otherColor,
+            color: Colors.transparent,
             borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: Colors.black12),
           ),
           clipBehavior: Clip.antiAlias,
           child: Row(
             children: [
-              Flexible(
-                flex: (imagesFrac * 1000).round(),
-                child: Container(color: imagesColor),
-              ),
-              Flexible(
-                flex: (videosFrac * 1000).round(),
-                child: Container(color: videosColor),
-              ),
-              Flexible(
-                flex: (otherFrac  * 1000).round(),
-                child: const SizedBox.shrink(), // already gray background
-              ),
+              if (imgFlex  > 0) Flexible(flex: imgFlex,  child: Container(color: _imagesColor)),
+              if (vidFlex  > 0) Flexible(flex: vidFlex,  child: Container(color: _videosColor)),
+              if (othFlex  > 0) Flexible(flex: othFlex,  child: Container(color: _otherColor)),
+              if (freeFlex > 0) Flexible(flex: freeFlex, child: Container(color: _freeColor)),
             ],
           ),
+        ),
+        const SizedBox(height: 8),
+        _Legend(img: img, vid: vid, oth: oth, free: free, fmt: _fmtBytes),
+      ],
+    );
+  }
+}
+
+class _Header extends StatelessWidget {
+  final String totalLabel;
+  const _Header({required this.totalLabel});
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Text("Storage", style: Theme.of(context).textTheme.titleMedium),
+        const Spacer(),
+        Text(totalLabel, style: Theme.of(context).textTheme.bodySmall),
+      ],
+    );
+  }
+}
+
+class _Legend extends StatelessWidget {
+  final int img, vid, oth, free;
+  final String Function(int)? fmt;
+  const _Legend({required this.img, required this.vid, required this.oth, required this.free, this.fmt});
+
+  @override
+  Widget build(BuildContext context) {
+    String f(int b) => fmt != null ? fmt!(b) : "$b B";
+
+    Widget _dot(Color c) => Container(
+        width: 12,
+        height: 12,
+        decoration: BoxDecoration(
+          color: c,
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: Theme.of(context).colorScheme.outlineVariant, // subtle black outline
+            width: 1.5,                           // thin border, not harsh
+          ),
+        ),
+      );
+
+    Widget _item(Color c, String label, String value) => Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _dot(c),
+            const SizedBox(width: 6),
+            Flexible(child: Text("$label: $value", overflow: TextOverflow.ellipsis)),
+          ],
+        );
+
+     return LayoutBuilder(
+      builder: (context, constraints) {
+        const spacing = 16.0;
+        // 2 columns on normal/wide; collapse to 1 on very narrow widths
+        final cols = constraints.maxWidth < 320 ? 1 : 2;
+        final itemWidth = (constraints.maxWidth - spacing * (cols - 1)) / cols;
+
+        final children = <Widget>[
+          _item(StorageBar._imagesColor, "Images", f(img)),
+          _item(StorageBar._videosColor, "Videos", f(vid)),
+          _item(StorageBar._otherColor,  "Other",  f(oth)),
+          _item(StorageBar._freeColor,   "Free",   f(free)),
+        ].map((w) => SizedBox(width: itemWidth, child: w)).toList();
+
+    return Wrap(
+          spacing: spacing,
+          runSpacing: 6,
+          children: children,
         );
       },
+    );
+  }
+}
+
+class _EmptyBar extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 12,
+      decoration: BoxDecoration(
+        // Empty track with border to keep layout
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.black12),
+      ),
     );
   }
 }
@@ -2003,15 +2232,28 @@ class _FrameSettingsTabState extends State<FrameSettingsTab> {
 /// Storage stats model 
 /// ----------------------------------------------------------------------------
 class StorageStats {
-  final int total, images, videos, other;
-  StorageStats({required this.total, required this.images, required this.videos, required this.other});
+  final int total, used, images, videos, other;
+  StorageStats({required this.total, required this.used, required this.images, required this.videos, required this.other});
+    
+    int get free => (total - used).clamp(0, total);
+
     factory StorageStats.fromJson(Map<String, dynamic> j) {
     final total = (j['total_bytes'] ?? 0) as int;
-    final used  = (j['used_bytes']  ?? 0) as int;
     final images = (j['images_bytes'] ?? 0) as int;
     final videos = (j['videos_bytes'] ?? 0) as int;
-    final other  = (j['other_bytes']  ?? (used - images - videos)) as int;
-    return StorageStats(total: total, images: images, videos: videos, other: other);
+    // If backend gives `used_bytes`, trust it; else compute from parts.
+    int used = (j['used_bytes'] ?? 0) as int;
+    int other = (j['other_bytes'] ?? 0) as int;
+    
+    if (used <= 0){
+      // compute 'other' if missing; then derive 'used'
+      if (other <= 0) other = (images + videos);
+      used = (images + videos + other);
+    } else {
+      // ensure 'other' is consistent if present
+      if (other <= 0) other = (used - images - videos).clamp(0, used);
+    }
+    return StorageStats(total: total, used: used, images: images, videos: videos, other: other);
   }
 }
 
@@ -2029,12 +2271,23 @@ extension ApiStorage on Api {
   }
 }
 
+extension ApiRev on Api {
+  Future<int?> getLibraryRev() async {
+    try {
+      final r = await http.get(Uri.parse("$base/library/rev"), headers: _headers)
+                          .timeout(const Duration(seconds: 3));
+      if (r.statusCode == 200) return (json.decode(r.body)['rev'] as num).toInt();
+    } catch (_) {}
+    return null;
+  }
+}
 
 /// ----------------------------------------------------------------------------
 /// Selection editor (for already-uploaded grid items; optional stub)
 /// ----------------------------------------------------------------------------
 class SelectionEditor extends StatefulWidget {
-  const SelectionEditor({super.key});
+  final List<LibEntry> entries;
+  const SelectionEditor({super.key, required this.entries});
   @override
   State<SelectionEditor> createState() => _SelectionEditorState();
 }
@@ -2043,8 +2296,9 @@ class _SelectionEditorState extends State<SelectionEditor> {
   final Set<String> selected = {};
   @override
   Widget build(BuildContext context) {
-    final state = InheritedAppState.of(context);
-    final items = state.media;
+    final items = widget.entries;
+    final app = InheritedAppState.of(context);
+    final api = Api(app.serverBase!, app.authToken);
 
     return Scaffold(
       appBar: AppBar(
@@ -2053,11 +2307,59 @@ class _SelectionEditorState extends State<SelectionEditor> {
         actions: [
           TextButton(
             onPressed: selected.isEmpty ? null : () async {
-              await showModalBottomSheet(
+              final choice = await showModalBottomSheet<String>(
                 context: context,
                 showDragHandle: true,
-                builder: (_) => const _SelectionActionsSheet(),
+                builder: (_) => SafeArea(
+                  child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    ListTile(
+                      leading: const Icon(Icons.slideshow),
+                      title: const Text("Include in slideshow"),
+                      onTap: () => Navigator.pop(context, "include"),
+                    ),
+                    ListTile(
+                      leading: const Icon(Icons.block),
+                      title: const Text("Exclude from slideshow"),
+                      onTap: () => Navigator.pop(context, "exclude"),
+                    ),
+                    ListTile(
+                      leading: const Icon(Icons.delete_outline),
+                      title: const Text("Remove from frame"),
+                      onTap: () => Navigator.pop(context, "remove"),
+                    ),
+                    const SizedBox(height: 8),
+                  ]),
+                ),
               );
+              if (choice == null) return;
+              // Apply choice to all selected items
+              int ok = 0, fail = 0;
+              for (final id in selected) {
+                late bool res;
+                switch (choice) {
+                  case "include":
+                    res = await api.setFlags(id, include: true, excludeFromShuffle: false);
+                    break;
+                  case "exclude":
+                    res = await api.setFlags(id, excludeFromShuffle: true);
+                    break;
+                  case "delete":
+                    res = await api.deleteItem(id);
+                    if (res) {
+                      // reflect removal locally
+                      widget.entries.removeWhere((e) => e.id == id);
+                    }
+                    break;
+                  default: res = true;
+                }
+                res ? ok++ : fail++;
+              }
+              if (!mounted) return;
+              setState(() {selected.clear();});
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text("Done: $ok${fail>0? " failed: $fail": ""}")),
+              );
+              // Also refresh home's library when we pop back
               if (mounted) Navigator.pop(context);
             },
             child: Text("Next", style: TextStyle(color: selected.isEmpty ? Colors.grey : Colors.blue)),
@@ -2069,15 +2371,16 @@ class _SelectionEditorState extends State<SelectionEditor> {
         gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: 3, mainAxisSpacing: 6, crossAxisSpacing: 6),
         itemCount: items.length,
         itemBuilder: (_, i) {
-          final m = items[i];
-          final isSel = selected.contains(m.id);
+          final e = items[i];
+          final isSel = selected.contains(e.id);
           return GestureDetector(
             onTap: () {
-              setState(() { isSel ? selected.remove(m.id) : selected.add(m.id); });
+              setState(() { isSel ? selected.remove(e.id) : selected.add(e.id); });
             },
             child: Stack(
               fit: StackFit.expand,
               children: [
+                // thumbnail view (reuse same look as grid)
                 Container(color: Colors.grey.shade300, child: const Center(child: Icon(Icons.photo, color: Colors.white70))),
                 if (isSel)
                   Container(
