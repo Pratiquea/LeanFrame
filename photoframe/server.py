@@ -18,9 +18,19 @@ import mimetypes
 import math
 from PIL import Image, ImageDraw
 from urllib.parse import quote, unquote
+import hashlib
 
 _IMG_EXT = { "jpg","jpeg","png","webp","bmp","heic","heif","dng","tif","tiff","avif" }
 _VID_EXT = { "mp4","mov","m4v","avi","mkv","webm","hevc","heif","heifv" }  # extend as you like
+
+_LIB_REV = 1
+_REV_LOCK = threading.RLock()
+
+def _bump_rev():
+    global _LIB_REV
+    with _REV_LOCK:
+        _LIB_REV += 1
+
 
 
 def _lib_root() -> Path:
@@ -153,6 +163,11 @@ async def auth(x_auth_token: str | None = Header(default=None)):
     if not x_auth_token or not cfg or x_auth_token != cfg.server.auth_token:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+@app.get("/library/rev", dependencies=[Depends(auth)])
+async def library_rev():
+    with _REV_LOCK:
+        return JSONResponse({"rev": _LIB_REV})
+
 @app.get("/config/runtime")
 async def get_runtime():
     data = _load_yaml()
@@ -201,6 +216,7 @@ async def upload(file: UploadFile = File(...)):
     (lib / sub).mkdir(parents=True, exist_ok=True)
     final = lib / sub / file.filename
     shutil.move(str(dest_tmp), str(final))
+    _bump_rev()  # bump library revision
     return JSONResponse({"ok": True, "path": str(final)})
 
 @app.put("/config/runtime", dependencies=[Depends(auth)])
@@ -324,8 +340,18 @@ async def list_library():
         if item["id"] in meta:
             item["flags"] = meta[item["id"]]
         items.append(item)
-    # newest last modified first (optional)
+    # newest last modified first 
     items.sort(key=lambda x: (_lib_root() / unquote(x["id"])).stat().st_mtime if (_lib_root() / unquote(x["id"])).exists() else 0, reverse=True)
+
+    # ETag from rev (fast) or from hash of ids (slower but precise)
+    with _REV_LOCK:
+        etag = f'W/"librev-{_LIB_REV}"'
+    resp = Response(
+        content=json.dumps({"items": items}),
+        media_type="application/json",
+    )
+    resp.headers["ETag"] = etag
+
     return JSONResponse({ "items": items })
 
 def _thumb_for_image(p: Path, max_w: int) -> bytes:
@@ -387,6 +413,8 @@ async def delete_item(item_id: str = FPath(...)):
     if item_id in meta:
         del meta[item_id]
         _save_meta(meta)
+
+    _bump_rev()  # bump library revision
     return JSONResponse({"ok": True})
 
 @app.post("/library/{item_id:path}/flags", dependencies=[Depends(auth)])
@@ -408,4 +436,5 @@ async def set_flags(item_id: str = FPath(...), payload: Dict[str, Any] = None):
         rec["exclude_from_shuffle"] = exclude
     meta[item_id] = rec
     _save_meta(meta)
+    _bump_rev()  # bump library revision
     return JSONResponse({"ok": True, "flags": rec})
