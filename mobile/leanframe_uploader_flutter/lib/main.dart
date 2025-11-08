@@ -1127,7 +1127,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           children: [
                             Icon(Icons.grid_on, size: 18),
                             SizedBox(width: 6),
-                            Text("Photos"),
+                            Text("Memories"),
                           ],
                         ),
                       ),
@@ -1141,7 +1141,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           children: [
                             Icon(Icons.settings, size: 18),
                             SizedBox(width: 6),
-                            Text("Settings"),
+                            Text("Frame Controls"),
                           ],
                         ),
                       ),
@@ -1188,7 +1188,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               onPressed: () async => _runSystemPickerFlow(context),
               icon: const Icon(Icons.add),
-              label: const Text("Add Photos"),
+              label: const Text("Add Photos & Videos"),
             ),
           ),
         ),
@@ -1328,7 +1328,7 @@ class _PhotosHeaderRow extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
       child: Row(
         children: [
-          Text("Photos ($count)", style: const TextStyle(fontWeight: FontWeight.w600)),
+          Text("Media ($count)", style: const TextStyle(fontWeight: FontWeight.w600)),
           const Spacer(),
           Tooltip(
             message: (!state.connected)
