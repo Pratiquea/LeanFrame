@@ -13,10 +13,21 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:wifi_iot/wifi_iot.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:bonsoir/bonsoir.dart';
-import 'package:http/http.dart' as http;
 
 void main() => runApp(const LeanFrameApp());
 final appStateSingleton = AppState();
+/// ----------------------------------------------------------------------------
+/// UI Spacing Constants
+/// ----------------------------------------------------------------------------
+class Gaps {
+  static const xxs = 4.0;
+  static const xs  = 8.0;
+  static const sm  = 12.0;
+  static const md  = 16.0;
+  static const lg  = 20.0;
+  static const xl  = 24.0;
+}
+
 /// ----------------------------------------------------------------------------
 /// App State & API
 /// ----------------------------------------------------------------------------
@@ -587,7 +598,7 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
       padding: const EdgeInsets.all(16),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         const Text("Connect to setup Wi-Fi", style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
-        const SizedBox(height: 6),
+        const SizedBox(height: Gaps.sm),
         Text("Join this temporary Wi-Fi network:\n\nSSID: ${p.ssid}\nPassword: ${p.psk}"),
         const SizedBox(height: 12),
         const Text("After connecting, return to this app."),
@@ -619,6 +630,7 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
           }
         ),
         const Spacer(),
+        const SizedBox(height: Gaps.sm),
         /// Controls + status stacked vertically (no Row here)
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -648,10 +660,10 @@ class _FirstRunWizardState extends State<FirstRunWizard> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text("Phone connection status", style: TextStyle(fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 6),
+                  const SizedBox(height: Gaps.xs),
                   Text("SSID: ${_currSsid.isEmpty ? '—' : _currSsid}"),
                   Text("IP:   ${_currIp.isEmpty   ? '—' : _currIp}"),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: Gaps.xs),
                   Align(
                     alignment: Alignment.centerRight,
                     child: OutlinedButton.icon(
@@ -1078,7 +1090,7 @@ class _HomeScreenState extends State<HomeScreen> {
           // Use collection-if here (no declarations inside the list)
           if (needsSetup)
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
+              padding: const EdgeInsets.symmetric(horizontal: Gaps.md),
               child: Card(
                 color: Colors.amber.shade100,
                 child: ListTile(
@@ -1096,7 +1108,7 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
 
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            padding: const EdgeInsets.symmetric(horizontal: Gaps.md, vertical: Gaps.xs),
             child: _loadingStorage
                 ? const SizedBox(height: 12, child: LinearProgressIndicator())
                 : (_storage == null
@@ -1105,10 +1117,10 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
+            padding: const EdgeInsets.symmetric(horizontal: Gaps.md),
             child: LayoutBuilder(
               builder: (context, constraints) {
-                const double kSegHeight = 44; // tweak (40–48 feels nice)
+                const double kSegHeight = 48; // tweak (40–48 feels nice)
                 final totalWidth = constraints.maxWidth;
                 final segmentWidth = totalWidth / 2;
 
@@ -1153,12 +1165,14 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
 
 
-          const SizedBox(height: 8),
+          const SizedBox(height: Gaps.sm),
           if (tab == HubTab.photos)
             _PhotosHeaderRow(count: state.imageCount)
           else
             const _ActivityPlaceholder(),
+          const SizedBox(height: Gaps.xs),
           const Divider(height: 1),
+          const SizedBox(height: Gaps.xs),
           Expanded(
             child: RefreshIndicator(
               onRefresh: () {
@@ -1176,7 +1190,7 @@ class _HomeScreenState extends State<HomeScreen> {
       bottomNavigationBar: SafeArea(
         top: false,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+          padding: const EdgeInsets.fromLTRB(Gaps.md, Gaps.xs,Gaps.md, 12),
           child: SizedBox(
             width: double.infinity,
             height: 56,
@@ -1268,22 +1282,22 @@ class _AppDrawer extends StatelessWidget {
     return Drawer(
       child: SafeArea(
         child: ListView(
-          padding: EdgeInsets.zero,
+          padding: const EdgeInsets.symmetric(horizontal: Gaps.md),
           children: [
             // Section 1
             ListTile(
               title: Row(
-                children: [
-                  const Expanded(
+                children: const [
+                  Expanded(
                     child: Text(
                       "LeanFrame",
                       style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
                     ),
                   ),
-                  const Text(">", style: TextStyle(fontSize: 16)),
+                  Text(">", style: TextStyle(fontSize: 16)),
                 ],
               ),
-              onTap: () => Navigator.pop(context), // no-op; reserved for future
+              onTap: () => Navigator.pop(context),
             ),
             const Divider(height: 1),
 
@@ -1294,15 +1308,10 @@ class _AppDrawer extends StatelessWidget {
                 state.frameName,
                 style: const TextStyle(fontWeight: FontWeight.w500),
               ),
-              trailing: Icon(
-                Icons.circle,
-                color: dotColor,
-                size: 12,
-              ),
+              trailing: Icon(Icons.circle, color: dotColor, size: 12),
               onTap: () => Navigator.pop(context),
             ),
 
-            // (Optional) More items later:
             const SizedBox(height: 8),
             const Divider(height: 1),
             const ListTile(
@@ -1325,7 +1334,8 @@ class _PhotosHeaderRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final state = InheritedAppState.of(context);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
+      padding: const EdgeInsets.fromLTRB(Gaps.md, Gaps.xs, Gaps.md, Gaps.xs),
+      // padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
       child: Row(
         children: [
           Text("Media ($count)", style: const TextStyle(fontWeight: FontWeight.w600)),
@@ -1360,7 +1370,7 @@ class _ActivityPlaceholder extends StatelessWidget {
   Widget build(BuildContext context) {
     return const Padding(
       padding: EdgeInsets.fromLTRB(12, 12, 12, 8),
-      child: Align(alignment: Alignment.centerLeft, child: Text("Activity")),
+      child: Align(alignment: Alignment.centerLeft, child: Text("Controls")),
     );
   }
 }
@@ -1531,9 +1541,13 @@ class _PhotoGridState extends State<_PhotoGrid> {
         }
       },
       child: GridView.builder(
-        padding: const EdgeInsets.all(8),
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 3, mainAxisSpacing: 6, crossAxisSpacing: 6),
+        padding: const EdgeInsets.all(Gaps.xs),
+        // gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+          maxCrossAxisExtent: 180.0,
+          mainAxisSpacing: Gaps.xs,
+          crossAxisSpacing: Gaps.xs,
+          childAspectRatio: 1),
         itemCount: items.length,
         itemBuilder: (_, i) {
           final e = items[i];
@@ -1861,6 +1875,37 @@ class _EmptyBar extends StatelessWidget {
   }
 }
 
+class _SettingRow extends StatelessWidget {
+  final String label;
+  final Widget control;
+  const _SettingRow({required this.label, required this.control});
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (ctx, c) {
+        if (c.maxWidth < 360) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label),
+              const SizedBox(height: Gaps.xs),
+              control,
+            ],
+          );
+        }
+        return Row(
+          children: [
+            SizedBox(width: 140, child: Text(label)),
+            const SizedBox(width: Gaps.sm),
+            Expanded(child: control),
+          ],
+        );
+      },
+    );
+  }
+}
+
 
 class FrameSettingsTab extends StatefulWidget {
   const FrameSettingsTab({super.key});
@@ -2045,168 +2090,135 @@ class _FrameSettingsTabState extends State<FrameSettingsTab> {
 
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 100),
+      padding: const EdgeInsets.fromLTRB(Gaps.md, Gaps.md, Gaps.md, 100),
       children: [
         Text("Render", style: Theme.of(context).textTheme.titleMedium),
-        const SizedBox(height: 8),
+        const SizedBox(height: Gaps.sm),
 
         // 1.1 Mode: cover / contain
-        Row(children: [
-          const SizedBox(width: 140, child: Text("Fit mode")),
-          const SizedBox(width: 12),
-          DropdownButton<String>(
-            value: _mode,
-            items: const [
-              DropdownMenuItem(value: "cover", child: Text("Cover")),
-              DropdownMenuItem(value: "contain", child: Text("Contain")),
-            ],
-            onChanged: (v) => setState(() => _mode = v!),
+        _SettingRow(
+            label: "Fit mode",
+            control: DropdownButton<String>(
+              value: _mode,
+              items: const [
+                DropdownMenuItem(value: "cover", child: Text("Cover")),
+                DropdownMenuItem(value: "contain", child: Text("Contain")),
+              ],
+              onChanged: (v) => setState(() => _mode = v!),
+            ),
           ),
-        ]),
-        const SizedBox(height: 8),
+
+        const SizedBox(height: Gaps.xs),
 
         // 1.2/1.3 Padding style + 1.4 Color (if solid) + 1.5 Blur (if blur)
-        Row(children: [
-          const SizedBox(width: 140, child: Text("Padding style")),
-          const SizedBox(width: 12),
-          DropdownButton<String>(
-            value: _style,
-            items: _allStyles
-                .map((s) => DropdownMenuItem(value: s, child: Text(_labelForStyle(s))))
-                .toList(),
-            onChanged: (v) => setState(() => _style = v!),
+        _SettingRow(
+            label: "Padding style",
+            control: DropdownButton<String>(
+              value: _style,
+              items: _allStyles
+                  .map((s) => DropdownMenuItem(value: s, child: Text(_labelForStyle(s))))
+                  .toList(),
+              onChanged: (v) => setState(() => _style = v!),
+            ),
           ),
-        ]),
-        const SizedBox(height: 8),
-
-        // if (_style == "solid")
-        //   Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
-        //     const SizedBox(width: 140, child: Text("Color")),
-        //     const SizedBox(width: 12),
-        //     GestureDetector(
-        //       onTap: () async {
-        //         Color current = _parseHex(_colorHex);
-        //         final picked = await showDialog<Color>(
-        //           context: context,
-        //           builder: (_) => AlertDialog(
-        //             title: const Text("Pick color"),
-        //             content: SingleChildScrollView(child: BlockPicker(
-        //               pickerColor: current,
-        //               onColorChanged: (c) => current = c,
-        //             )),
-        //             actions: [
-        //               TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
-        //               FilledButton(onPressed: () => Navigator.pop(context, current), child: const Text("Select")),
-        //             ],
-        //           ),
-        //         );
-        //         if (picked != null) setState(() => _colorHex = _toHex(picked));
-        //       },
-        //       child: Container(
-        //         width: 48, height: 28, decoration: BoxDecoration(
-        //           color: _parseHex(_colorHex),
-        //           borderRadius: BorderRadius.circular(6),
-        //           border: Border.all(color: Colors.black12),
-        //         ),
-        //       ),
-        //     ),
-        //     const SizedBox(width: 12),
-        //     Expanded(child: Text(_colorHex)),
-        //   ]),
+        const SizedBox(height: Gaps.xs),
 
         if (_styleUsesColor)
-          Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
-            const SizedBox(width: 140, child: Text("Color")),
-            const SizedBox(width: 12),
-            GestureDetector(
-              onTap: () async {
-                Color current = _parseHex(_colorHex);
-                final picked = await showDialog<Color>(
-                  context: context,
-                  builder: (_) => AlertDialog(
-                    title: const Text("Pick color"),
-                    content: SingleChildScrollView(
-                      child: BlockPicker(
-                        pickerColor: current,
-                        onColorChanged: (c) => current = c,
+          _SettingRow(
+            label: "Color",
+            control: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+              GestureDetector(
+                onTap: () async {
+                  Color current = _parseHex(_colorHex);
+                  final picked = await showDialog<Color>(
+                    context: context,
+                    builder: (_) => AlertDialog(
+                      title: const Text("Pick color"),
+                      content: SingleChildScrollView(
+                        child: BlockPicker(
+                          pickerColor: current,
+                          onColorChanged: (c) => current = c,
+                        ),
                       ),
+                      actions: [
+                        TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
+                        FilledButton(onPressed: () => Navigator.pop(context, current), child: const Text("Select")),
+                      ],
                     ),
-                    actions: [
-                      TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
-                      FilledButton(onPressed: () => Navigator.pop(context, current), child: const Text("Select")),
-                    ],
+                  );
+                  if (picked != null) setState(() => _colorHex = _toHex(picked));
+                },
+                child: Container(
+                  width: 48, height: 28,
+                  decoration: BoxDecoration(
+                    color: _parseHex(_colorHex),
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: Colors.black12),
                   ),
-                );
-                if (picked != null) setState(() => _colorHex = _toHex(picked));
-              },
-              child: Container(
-                width: 48, height: 28,
-                decoration: BoxDecoration(
-                  color: _parseHex(_colorHex),
-                  borderRadius: BorderRadius.circular(6),
-                  border: Border.all(color: Colors.black12),
                 ),
               ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(child: Text(_colorHex)),
-          ]),
+              const SizedBox(width: 12),
+              Expanded(child: Text(_colorHex)),
+            ]),
+          ),
 
         if (_usesBlur)
-          Row(children: [
-            const SizedBox(width: 140, child: Text("Blur amount")),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Slider(
-                min: 0, max: 64, divisions: 64,
-                value: _blur,
-                label: _blur.toStringAsFixed(0),
-                onChanged: (v) => setState(() => _blur = v),
+        _SettingRow(
+            label: "Blur amount",
+            control: Row(children: [
+              Expanded(
+                child: Slider(
+                  min: 0, max: 64, divisions: 64,
+                  value: _blur,
+                  label: _blur.toStringAsFixed(0),
+                  onChanged: (v) => setState(() => _blur = v),
+                ),
               ),
-            ),
-            SizedBox(
-              width: 70,
-              child: TextField(
-                controller: TextEditingController(text: _blur.toStringAsFixed(0)),
-                keyboardType: TextInputType.number,
-                onSubmitted: (s) {
-                  final v = double.tryParse(s) ?? _blur;
-                  setState(() => _blur = v.clamp(0, 64));
-                },
+              SizedBox(
+                width: 70,
+                child: TextField(
+                  controller: TextEditingController(text: _blur.toStringAsFixed(0)),
+                  keyboardType: TextInputType.number,
+                  onSubmitted: (s) {
+                    final v = double.tryParse(s) ?? _blur;
+                    setState(() => _blur = v.clamp(0, 64));
+                  },
+                ),
               ),
-            ),
-          ]),
+            ]),
+          ),
 
-        const SizedBox(height: 24),
+        const SizedBox(height: Gaps.xl),
         Text("Playback", style: Theme.of(context).textTheme.titleMedium),
-        const SizedBox(height: 8),
+        const SizedBox(height: Gaps.xs),
 
         // 2.1 Slide duration (seconds)
-        Row(children: [
-          const SizedBox(width: 140, child: Text("Slide duration (s)")),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Slider(
-              min: 1, max: 120, divisions: 119,
-              value: _slideS,
-              label: _slideS.toStringAsFixed(0),
-              onChanged: (v) => setState(() => _slideS = v),
-            ),
+        _SettingRow(
+            label: "Slide duration (s)",
+            control: Row(children: [
+              Expanded(
+                child: Slider(
+                  min: 1, max: 120, divisions: 119,
+                  value: _slideS,
+                  label: _slideS.toStringAsFixed(0),
+                  onChanged: (v) => setState(() => _slideS = v),
+                ),
+              ),
+              SizedBox(
+                width: 70,
+                child: TextField(
+                  controller: TextEditingController(text: _slideS.toStringAsFixed(0)),
+                  keyboardType: TextInputType.number,
+                  onSubmitted: (s) {
+                    final v = double.tryParse(s) ?? _slideS;
+                    setState(() => _slideS = v.clamp(1, 120));
+                  },
+                ),
+              ),
+            ]),
           ),
-          SizedBox(
-            width: 70,
-            child: TextField(
-              controller: TextEditingController(text: _slideS.toStringAsFixed(0)),
-              keyboardType: TextInputType.number,
-              onSubmitted: (s) {
-                final v = double.tryParse(s) ?? _slideS;
-                setState(() => _slideS = v.clamp(1, 120));
-              },
-            ),
-          ),
-        ]),
 
-        const SizedBox(height: 8),
+        const SizedBox(height: Gaps.xs),
         SwitchListTile(
           contentPadding: EdgeInsets.zero,
           title: const Text("Shuffle"),
@@ -2220,30 +2232,31 @@ class _FrameSettingsTabState extends State<FrameSettingsTab> {
           onChanged: (v) => setState(() => _loop = v),
         ),
 
-        const SizedBox(height: 8),
-        Row(children: [
-          const SizedBox(width: 140, child: Text("Crossfade (ms)")),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Slider(
-              min: 0, max: 3000, divisions: 60,
-              value: _crossfadeMs.toDouble(),
-              label: _crossfadeMs.toString(),
-              onChanged: (v) => setState(() => _crossfadeMs = v.round()),
+        const SizedBox(height: Gaps.xs),
+        _SettingRow(
+          label: "Crossfade duration (ms)",
+          control: Row(children: [
+            Expanded(
+              child: Slider(
+                min: 0, max: 3000, divisions: 60,
+                value: _crossfadeMs.toDouble(),
+                label: _crossfadeMs.toString(),
+                onChanged: (v) => setState(() => _crossfadeMs = v.round()),
+              ),
             ),
-          ),
-          SizedBox(
-            width: 90,
-            child: TextField(
-              controller: TextEditingController(text: _crossfadeMs.toString()),
-              keyboardType: TextInputType.number,
-              onSubmitted: (s) {
-                final v = int.tryParse(s) ?? _crossfadeMs;
-                setState(() => _crossfadeMs = v.clamp(0, 10000));
-              },
+            SizedBox(
+              width: 90,
+              child: TextField(
+                controller: TextEditingController(text: _crossfadeMs.toString()),
+                keyboardType: TextInputType.number,
+                onSubmitted: (s) {
+                  final v = int.tryParse(s) ?? _crossfadeMs;
+                  setState(() => _crossfadeMs = v.clamp(0, 10000));
+                },
+              ),
             ),
-          ),
-        ]),
+          ]),
+        ),
 
         const SizedBox(height: 16),
         FilledButton.icon(
@@ -2456,7 +2469,7 @@ class _SelectionEditorState extends State<SelectionEditor> {
         ],
       ),
       body: GridView.builder(
-        padding: const EdgeInsets.all(8),
+        padding: const EdgeInsets.all(Gaps.xs),
         gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
           crossAxisCount: 3, mainAxisSpacing: 6, crossAxisSpacing: 6),
         itemCount: items.length,
@@ -2555,7 +2568,7 @@ class _ConfirmUploadSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     return SafeArea(
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
+        padding: const EdgeInsets.fromLTRB(Gaps.md, 10, Gaps.md, Gaps.md),
         child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text("Ready to upload", style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 8),
@@ -2700,14 +2713,23 @@ Future<bool> _confirmDelete(BuildContext context, {int count = 1}) async {
           title: const Text("Remove from frame?"),
           content: Text("This will remove $count $plural from the frame."),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Cancel")),
-            FilledButton.tonal(
-              style: FilledButton.styleFrom(foregroundColor: Colors.red),
-              onPressed: () => Navigator.pop(context, true),
-              child: const Text("Remove"),
+            Padding(padding: EdgeInsets.only(right: Gaps.xs),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Cancel"),
+                ),
+                const SizedBox(width: Gaps.sm),
+                FilledButton.tonal(
+                  style: FilledButton.styleFrom(foregroundColor: Colors.red),
+                  onPressed: () => Navigator.pop(context, true),
+                  child: const Text("Remove"),
+              ),
+              ],
+            )
             ),
           ],
-        ),
+        )
       )) ??
       false;
 }
