@@ -30,6 +30,154 @@ class Viewer:
             self.current_id = rows[0][0] if rows else None
         # dynamic reconfigure: subscribe once
         runtime_bus.subscribe(self._on_runtime_update)
+        # -------- Flags-aware playlist state --------
+        self._meta_cache: dict[str, dict] = {}
+        self._meta_mtime: float = 0.0
+        self._playlist: list[tuple[int, str, str]] = []  # [(id, path, kind)]
+        self._id_index: dict[int, int] = {}              # id -> index in _playlist
+        self._rebuild_playlist()  # build initial playlist using flags
+
+        # ---- Flags-aware playlist + meta helpers ----
+    def _meta_path(self) -> Path:
+        """Return path to .meta.json in the configured library."""
+        return self.cfg.paths.library / ".meta.json"
+
+    def _load_meta_if_changed(self) -> None:
+        """
+        Lazy-reload .meta.json if its mtime changed.
+        Stores into self._meta_cache as {item_id: {"include": bool?, "exclude_from_shuffle": bool?}, ...}
+        """
+        try:
+            p = self._meta_path()
+            if not p.exists():
+                if self._meta_cache:
+                    self._meta_cache = {}
+                self._meta_mtime = 0.0
+                return
+            m = p.stat().st_mtime
+            if m != self._meta_mtime:
+                self._meta_cache = json.loads(p.read_text() or "{}")
+                self._meta_mtime = m
+        except Exception:
+            # Keep last good cache on any read/parse error
+            pass
+
+    def _eligible_filter(self, rows: list[tuple[int, str, str]]) -> list[tuple[int, str, str]]:
+        """
+        Slideshow semantics:
+          - If ANY item has include==True -> show ONLY those included items,
+            then remove any that also have exclude_from_slideshow==True.
+          - Else (no explicit includes) -> show ALL items EXCEPT those with exclude_from_slideshow==True.
+        """
+        self._load_meta_if_changed()
+
+        inc_set: set[str] = set()
+        exc_set: set[str] = set()
+        for item_id, flags in self._meta_cache.items():
+            if not isinstance(flags, dict):
+                continue
+            if flags.get("include") is True:
+                inc_set.add(item_id)
+            # accept either canonical or legacy key in existing files (paranoia)
+            if flags.get("exclude_from_slideshow") is True or flags.get("exclude_from_shuffle") is True:
+                exc_set.add(item_id)
+
+        lib_root = str(self.cfg.paths.library.as_posix())
+        def rel_id(path: str) -> str:
+            p = Path(path).resolve().as_posix()
+            if p.startswith(lib_root + "/"):
+                return p[len(lib_root)+1:]
+            # fallback: just the filename (rare, but keeps things moving)
+            return Path(path).name
+
+        # If there are any includes -> whitelist then subtract exclusions
+        if inc_set:
+            out = []
+            for (mid, path, kind) in rows:
+                rid = rel_id(path)
+                if rid in inc_set and rid not in exc_set:
+                    out.append((mid, path, kind))
+            return out
+
+        # Otherwise -> global list minus exclusions
+        out = []
+        for (mid, path, kind) in rows:
+            rid = rel_id(path)
+            if rid in exc_set:
+                continue
+            out.append((mid, path, kind))
+        return out
+
+
+    def _rebuild_playlist(self) -> None:
+        """
+        Build self._playlist ([(id, path, kind), ...]) and id->index map
+        honoring include / exclude flags and shuffle preference.
+        """
+        # Pull raw ordered rows from DB
+        rows = self.lib.list_ids()  # [(id, path, kind)]
+        norm: list[tuple[int, str, str]] = []
+        for r in rows:
+            if len(r) == 3:
+                norm.append((int(r[0]), str(r[1]), str(r[2])))
+            else:
+                # In case list_ids ever returns [id] form, normalize
+                mid = int(r[0])
+                rb = self.lib.get_by_id(mid)
+                if rb:
+                    norm.append((int(rb[0]), str(rb[1]), str(rb[2])))
+
+        # Filter according to flags
+        eligible = self._eligible_filter(norm)
+
+        # If shuffle mode is on, randomize *but* keep a stable seed per boot for nice behavior
+        if self.cfg.playback.shuffle:
+            tmp = eligible[:]
+            random.shuffle(tmp)
+            self._playlist = tmp
+        else:
+            self._playlist = eligible
+
+        # Rebuild index map
+        self._id_index = {mid: i for i, (mid, _, _) in enumerate(self._playlist)}
+
+        # If current isn't eligible anymore, move to the first eligible
+        if self.current_id is not None and self.current_id not in self._id_index:
+            self.current_id = self._playlist[0][0] if self._playlist else None
+
+    def _next_play_id(self, after_id: int | None) -> int | None:
+        """
+        Return the next id to play based on current playlist and loop setting.
+        In shuffle mode, walk the shuffled list (no immediate repeats).
+        """
+        if not self._playlist:
+            return None
+        if after_id is None:
+            return self._playlist[0][0]
+
+        i = self._id_index.get(after_id, None)
+        if i is None:
+            return self._playlist[0][0]
+
+        j = i + 1
+        if j < len(self._playlist):
+            return self._playlist[j][0]
+        # End reached
+        return self._playlist[0][0] if self.cfg.playback.loop else None
+
+    def _row_for_id(self, mid: int | None) -> tuple[int, str, str] | None:
+        if mid is None:
+            return None
+        # Fast path: index lookup then tuple
+        i = self._id_index.get(mid)
+        if i is not None and 0 <= i < len(self._playlist):
+            return self._playlist[i]
+        # Fallback to DB (should be rare)
+        rb = self.lib.get_by_id(mid)
+        if rb:
+            return (int(rb[0]), str(rb[1]), str(rb[2]))
+        return None
+
 
     def _on_runtime_update(self, data: dict) -> None:
         """
@@ -94,9 +242,11 @@ class Viewer:
                 print("[watchdog] running scan_once on viewer thread ...")
                 self.lib.scan_once(recursive=self.cfg.indexer.recursive,
                                    ignore_hidden=self.cfg.indexer.ignore_hidden)
+                # rebuild playlist according to flags
+                self._rebuild_playlist()
                 self.watch_flag.clear()
 
-            row = self.lib.get_by_id(self.current_id) if self.current_id else None
+            row = self._row_for_id(self.current_id)
             if not row:
                 # draw message
                 self.screen.fill((0,0,0))
@@ -104,14 +254,15 @@ class Viewer:
                 rect = msg.get_rect(center=(self.W//2, self.H//2))
                 self.screen.blit(msg, rect)
                 pygame.display.flip()
-                # try rescanning occasionally
+                # Try rescanning & rebuilding occasionally
                 self.lib.scan_once(recursive=self.cfg.indexer.recursive, ignore_hidden=self.cfg.indexer.ignore_hidden)
+                self._rebuild_playlist()
+                self.current_id = self._next_play_id(None)
                 time.sleep(2)
-                rows = self.lib.list_ids()
-                self.current_id = rows[0][0] if rows else None
                 continue
-                time.sleep(1); continue
+
             mid, path, kind = row
+
             print(f"[viewer] showing id={mid} kind={kind} path={path}")
             path = Path(path)
             try:
@@ -132,7 +283,11 @@ class Viewer:
                 self.current_id = self.lib.next_id(mid, loop=self.cfg.playback.loop)
                 continue
             # next
-            self.current_id = self.lib.next_id(mid, loop=self.cfg.playback.loop)
+            self._load_meta_if_changed()
+            self._rebuild_playlist()
+            # next according to flags-aware playlist
+            self.current_id = self._next_play_id(mid)
+
 
     def _show_image(self, path: str):
         """
@@ -179,46 +334,33 @@ class Viewer:
 
     def _preload_neighbors(self, current_id: int):
         """
-        Builds a tiny [prev, curr, next] list of image paths around current_id
-        and asks the loader to warm prev/next in background.
+        Warm prev/next **images** around the current item within the flags-aware playlist.
         """
-        rows = self.lib.list_ids() #[(id, path, kind), ...] or [(id.), ...]
-        # Normalize to a list of (id, path, kind)
-        norm = []
-        for r in rows:
-            if len(r) == 3:
-                norm.append(r)
-            else:
-                mid = r[0]
-                row = self.lib.get_by_id(mid)
-                if row:
-                    norm.append(row)
-        if not norm:
+        if not self._playlist or current_id not in self._id_index:
             return
+        i = self._id_index[current_id]
+        n = len(self._playlist)
+        prev_i = (i - 1) % n
+        next_i = (i + 1) % n
 
-        ids = [r[0] for r in norm]
-        try:
-            i = ids.index(current_id)
-        except ValueError:
-            return
-        
-        n = len(norm)
-        prev_i = (i-1) % n
-        next_i = (i+1) % n
+        def is_img(tup: tuple[int, str, str]) -> bool:
+            _id, _p, _k = tup
+            return Path(_p).suffix.lower() in SUPPORTED_IMAGES
 
-        # Only keep image paths (skip video preloading)
-        def img_path(t):
-            _id, _p, _k = t
-            return str(_p) if Path(_p).suffix.lower() in SUPPORTED_IMAGES else None
-        
-        prev_p = img_path(norm[prev_i])
-        curr_p = img_path(norm[i])
-        next_p = img_path(norm[next_i])
-        paths = [p for p in [prev_p, curr_p, next_p] if p]
-        if paths and len(paths) >= 2:
-            # idx=position of current within the paths list
-            idx = paths.index(curr_p) if curr_p in paths else 0
-            self.loader.preload_neighbors(paths, idx)
+        # Collect current lane: prev, curr, next if they are images
+        lane = []
+        for idx in (prev_i, i, next_i):
+            tup = self._playlist[idx]
+            if is_img(tup):
+                lane.append(str(tup[1]))
+
+        if lane:
+            # idx of current within lane if present
+            try:
+                cur_idx = lane.index(str(self._playlist[i][1]))
+            except ValueError:
+                cur_idx = 0
+            self.loader.preload_neighbors(lane, cur_idx)
 
 
     def _sleep_with_events(self, seconds: float):

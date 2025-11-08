@@ -421,20 +421,31 @@ async def delete_item(item_id: str = FPath(...)):
 async def set_flags(item_id: str = FPath(...), payload: Dict[str, Any] = None):
     _ = _path_from_id(item_id)  # validate exists
     payload = payload or {}
+
     include = payload.get("include")
-    exclude = payload.get("exclude_from_shuffle")
-    # both are optional booleans
+    # accept old key for backward compatibility
+    exclude = payload.get("exclude_from_slideshow")
+    if exclude is None:
+        exclude = payload.get("exclude_from_shuffle")
+
+    # validate
     if include is not None and not isinstance(include, bool):
         raise HTTPException(400, "include must be boolean")
     if exclude is not None and not isinstance(exclude, bool):
-        raise HTTPException(400, "exclude_from_shuffle must be boolean")
+        raise HTTPException(400, "exclude_from_slideshow must be boolean")
+
     meta = _load_meta()
     rec = meta.get(item_id, {})
     if include is not None:
         rec["include"] = include
     if exclude is not None:
-        rec["exclude_from_shuffle"] = exclude
+        # store canonically
+        rec["exclude_from_slideshow"] = exclude
+        # remove legacy key if present
+        if "exclude_from_shuffle" in rec:
+            del rec["exclude_from_shuffle"]
+
     meta[item_id] = rec
     _save_meta(meta)
-    _bump_rev()  # bump library revision
+    _bump_rev()
     return JSONResponse({"ok": True, "flags": rec})
