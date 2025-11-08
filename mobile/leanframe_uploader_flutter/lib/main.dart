@@ -1473,7 +1473,7 @@ class _PhotoGridState extends State<_PhotoGrid> {
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           ListTile(
             leading: const Icon(Icons.block), dense: true,
-            title: const Text("Exclude from shuffle"),
+            title: const Text("Exclude from slideshow"),
             onTap: () => Navigator.pop(ctx, "Exclude from shuffle"),
           ),
           ListTile(
@@ -1506,11 +1506,11 @@ class _PhotoGridState extends State<_PhotoGrid> {
           _thumbs.get(e.id); // keep or drop; optional to evict
         }
         break;
-      case "Exclude from shuffle":
-        ok = await api.setFlags(e.id, excludeFromShuffle: true);
+      case "Exclude from slideshow":
+        ok = await api.setFlags(e.id, excludeFromSlideshow: true);
         break;
       case "Include in slideshow":
-        ok = await api.setFlags(e.id, include: true, excludeFromShuffle: false);
+        ok = await api.setFlags(e.id, include: true, excludeFromSlideshow: false);
         break;
       default:
         return;
@@ -1632,11 +1632,11 @@ extension ApiLibrary on Api {
     } catch (_) { return false; }
   }
 
-  Future<bool> setFlags(String id, {bool? include, bool? excludeFromShuffle}) async {
+  Future<bool> setFlags(String id, {bool? include, bool? excludeFromSlideshow}) async {
     try {
       final body = <String, dynamic>{};
       if (include != null) body['include'] = include;
-      if (excludeFromShuffle != null) body['exclude_from_shuffle'] = excludeFromShuffle;
+      if (excludeFromSlideshow != null) body['exclude_from_slideshow'] = excludeFromSlideshow; 
       final res = await http.post(
         Uri.parse("$base/library/$id/flags"),
         headers: {..._headers, "Content-Type": "application/json"},
@@ -2379,10 +2379,10 @@ class _SelectionEditorState extends State<SelectionEditor> {
       bool res = true;
       switch (action) {
         case "include":
-          res = await api.setFlags(id, include: true, excludeFromShuffle: false);
+          res = await api.setFlags(id, include: true, excludeFromSlideshow: false);
           break;
         case "exclude":
-          res = await api.setFlags(id, excludeFromShuffle: true);
+          res = await api.setFlags(id, excludeFromSlideshow: true);
           break;
         case "remove":
           res = await api.deleteItem(id);
