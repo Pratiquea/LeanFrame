@@ -1,48 +1,44 @@
-# Panel & display
 screen:
   width: 1920
   height: 1080
   fullscreen: true
   cursor_hidden: true
-
-# Display/rendering options
-# mode: cover (crop to fill) | contain (preserve aspect, pad)
-# padding:
-# style: solid | blur
-# color: "#000000" # only used when style=solid
 render:
-  mode: contain          # cover | contain
+  mode: contain
   padding:
-    style: motion        # solid | blur | average | mirror | stretch | gradient_linear | gradient_radial | glass | motion | texture | dim
-    color: "#000000"   # only used when style=solid
-    blur_amount: 10    # only when style is blur | glass (Higher = more blur)
-    
-# Playback
+    style: motion
+    color: '#000000'
+    blur_amount: 0.0
 playback:
-  slide_duration_s: 3
+  slide_duration_s: 1.0
   shuffle: true
   loop: true
   resume_on_start: true
   transitions:
     crossfade: true
     crossfade_ms: 150
-
-# Library paths
 paths:
   library: data/library
   import: data/import
   state: data/state.json
   db: data/library.db
-
-# Server (uploads)
 server:
   host: 0.0.0.0
   port: 8765
-  auth_token: "change-me"
+  auth_token: change-me
   max_upload_mb: 512
-  allow_extensions: [jpg, jpeg, png, webp, heic, heif, dng, avif, mp4, mov, mkv]
-
-# Conversion fallback (rare)
+  allow_extensions:
+  - jpg
+  - jpeg
+  - png
+  - webp
+  - heic
+  - heif
+  - dng
+  - avif
+  - mp4
+  - mov
+  - mkv
 conversion:
   enabled: true
   ffmpeg_bin: ffmpeg
@@ -51,28 +47,46 @@ conversion:
   target_video_format: mp4
   video_codec: libx264
   crf: 23
-
-# Indexer
 indexer:
   watch: true
   recursive: true
   ignore_hidden: true
-
-# Cloud sync via rclone
 sync:
   enabled: false
-  mode: rclone          # rclone | photos_api | off
+  mode: rclone
   interval_minutes: 10
   rclone:
     bin: rclone
     jobs:
-      - name: google_drive_album
-        remote: "gdrive:"
-        include_ext: [jpg, jpeg, png, webp, heic, heif, dng, avif, mp4, mov, mkv]
-        dest_subdir: drive
-        one_way: true
-      - name: google_photos
-        remote: gphotos:media/by-year/
-        include_ext: [jpg, jpeg, png, webp, heic, heif, dng, avif, mp4, mov, mkv]
-        dest_subdir: gphotos
-        one_way: true
+    - name: google_drive_album
+      remote: 'gdrive:'
+      include_ext:
+      - jpg
+      - jpeg
+      - png
+      - webp
+      - heic
+      - heif
+      - dng
+      - avif
+      - mp4
+      - mov
+      - mkv
+      dest_subdir: drive
+      one_way: true
+    - name: google_photos
+      remote: gphotos:media/by-year/
+      include_ext:
+      - jpg
+      - jpeg
+      - png
+      - webp
+      - heic
+      - heif
+      - dng
+      - avif
+      - mp4
+      - mov
+      - mkv
+      dest_subdir: gphotos
+      one_way: true

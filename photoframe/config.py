@@ -135,15 +135,17 @@ class AppCfg:
             pb["loop"] = bool(pb["loop"])
 
         # now safe to construct
-        playback = PlaybackCfg(
-            **pb  # or map fields explicitly if your constructor uses different names
-        )
-        # transitions = pb.pop("transitions", {}) or {}
         # playback = PlaybackCfg(
-        # **pb,
-        # transitions_crossfade=bool(transitions.get("crossfade", True)),
-        # crossfade_ms=int(transitions.get("crossfade_ms", 350)),
+        #     **pb  # or map fields explicitly if your constructor uses different names
         # )
+        transitions = pb.pop("transitions", {}) or {}
+        print("playback = ",pb)
+        print("transitions = ", transitions)
+        playback = PlaybackCfg(
+        **pb,
+        transitions_crossfade=bool(transitions.get("crossfade", True)),
+        crossfade_ms=int(transitions.get("crossfade_ms", 350)),
+        )
 
         p = data["paths"]
         paths = PathsCfg(
