@@ -174,6 +174,9 @@ async def get_runtime():
     render = data.get("render", {})
     pad = render.get("padding", {})
     pb = data.get("playback", {})
+    trans = pb.get("transitions", {}) or {}
+
+    crossfade_ms_val = trans.get("crossfade_ms", pb.get("crossfade_ms", 300))
 
     out = {
         "render": {
@@ -189,7 +192,7 @@ async def get_runtime():
             "slide_duration_s": float(pb.get("slide_duration_s", 12.0)),
             "shuffle": bool(pb.get("shuffle", False)),
             "loop": bool(pb.get("loop", True)),
-            "crossfade_ms": int(pb.get("crossfade_ms", 300)), 
+            "crossfade_ms": int(crossfade_ms_val),
         },
     }
     return JSONResponse(out)
@@ -248,52 +251,59 @@ async def put_runtime(payload: Dict[str, Any]):
         if blur_amount < 0 or blur_amount > 1000:
             raise ValueError("render.padding.blur_amount must be between 0 and 1000")
 
-        pb = payload.get("playback", {})
-        slide_duration_s = float(pb.get("slide_duration_s", 12.0))
-        if slide_duration_s <= 0:
-            raise ValueError("playback.slide_duration_s must be > 0")
+        pb_req = payload.get("playback", {}) or {}
 
-        shuffle = bool(pb.get("shuffle", False))
-        loop = bool(pb.get("loop", True))
-        crossfade_ms = int(pb.get("crossfade_ms", 300))
+        # Validation (unchanged logic; still allow omitting keys)
+        slide_duration_s = float(pb_req.get("slide_duration_s", 12.0))
+        if slide_duration_s <= 0:
+            raise HTTPException(400, "playback.slide_duration_s must be > 0")
+
+        shuffle = bool(pb_req.get("shuffle", False))
+        loop = bool(pb_req.get("loop", True))
+
+        # Accept crossfade_ms from request if present; default only for publishing/response
+        crossfade_ms = pb_req.get("crossfade_ms", 300)
+        try:
+            crossfade_ms = int(crossfade_ms)
+        except Exception:
+            raise HTTPException(400, "playback.crossfade_ms must be an integer")
         if crossfade_ms < 0:
-            raise ValueError("playback.crossfade_ms must be >= 0")
-    except (TypeError, ValueError) as e:
-        raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(400, "playback.crossfade_ms must be >= 0")
+
 
     # --------- Persist to YAML (preserve other keys) ----------
     data = _load_yaml()
+    pb_yaml = data.setdefault("playback", {})
+    trans_yaml = pb_yaml.setdefault("transitions", {})
 
-    # render
-    data.setdefault("render", {})
-    data["render"]["mode"] = mode
-    data["render"].setdefault("padding", {})
-    data["render"]["padding"]["style"] = style
-    data["render"]["padding"]["color"] = color
-    data["render"]["padding"]["blur_amount"] = blur_amount
-
-    pb = data.setdefault("playback", {})
-    pb["slide_duration_s"] = slide_duration_s
-    # pb["transition_crossfade_ms"] = crossfade_ms
-    pb["crossfade_ms"] = crossfade_ms
-    pb["shuffle"] = shuffle
-    pb["loop"] = loop
-    # remove alias keys that cause duplicates for loaders with aliases
+    # Only write keys that were actually present in the request
+    if "slide_duration_s" in pb_req:
+        pb_yaml["slide_duration_s"] = slide_duration_s
+    if "shuffle" in pb_req:
+        pb_yaml["shuffle"] = shuffle
+    if "loop" in pb_req:
+        pb_yaml["loop"] = loop
+    if "crossfade_ms" in pb_req:
+        trans_yaml["crossfade_ms"] = crossfade_ms
+        # Clean up legacy flat key if it exists
+        if "crossfade_ms" in pb_yaml:
+            del pb_yaml["crossfade_ms"]
 
     _save_yaml(data)
 
-    # --------- Publish to subscribers (dynamic reconfigure) ----------
+    # --- Publish to subscribers (keep API/IPC flat for the running app) ---
+    pb_out = {}
+    if "slide_duration_s" in pb_req: pb_out["slide_duration_s"] = slide_duration_s
+    if "shuffle" in pb_req:          pb_out["shuffle"] = shuffle
+    if "loop" in pb_req:             pb_out["loop"] = loop
+    if "crossfade_ms" in pb_req:     pb_out["crossfade_ms"] = crossfade_ms
+
     runtime_bus.publish({
         "render": {
             "mode": mode,
             "padding": {"style": style, "color": color, "blur_amount": blur_amount},
         },
-        "playback": {
-            "slide_duration_s": slide_duration_s,
-            "shuffle": shuffle,
-            "loop": loop,
-            "crossfade_ms": crossfade_ms,
-        },
+        "playback": pb_out,  # still flat for live viewers
     })
 
     return JSONResponse({"ok": True})
