@@ -32,7 +32,6 @@ def _bump_rev():
         _LIB_REV += 1
 
 
-
 def _lib_root() -> Path:
     assert cfg and cfg.paths and cfg.paths.library, "cfg.paths.library not set"
     return Path(cfg.paths.library)
@@ -269,7 +268,8 @@ async def put_runtime(payload: Dict[str, Any]):
             raise HTTPException(400, "playback.crossfade_ms must be an integer")
         if crossfade_ms < 0:
             raise HTTPException(400, "playback.crossfade_ms must be >= 0")
-
+    except (TypeError, ValueError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     # --------- Persist to YAML (preserve other keys) ----------
     data = _load_yaml()
