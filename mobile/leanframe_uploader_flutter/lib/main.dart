@@ -1612,8 +1612,11 @@ class _PhotoGridState extends State<_PhotoGrid> {
           return GestureDetector(
             onLongPress: () => _openActions(context, e),
             onTap: () {
-              // re-use your selection editor flow if needed
-              // or toggle a local selected set (not shown here)
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => PhotoDetailPage(entry: e),
+                ),
+              );
             },
             child: Stack(
               fit: StackFit.expand,
@@ -1672,7 +1675,6 @@ class _PhotoGridState extends State<_PhotoGrid> {
   }
 }
 
-
 class LibEntry {
   final String id;
   final String kind; // "image" | "video" | fallback
@@ -1717,7 +1719,6 @@ extension ApiLibrary on Api {
       return res.statusCode == 200 || res.statusCode == 204;
     } catch (_) { return false; }
   }
-
   Future<bool> setFlags(String id, {bool? include, bool? excludeFromSlideshow}) async {
     try {
       final body = <String, dynamic>{};
@@ -1730,6 +1731,28 @@ extension ApiLibrary on Api {
       ).timeout(const Duration(seconds: 5));
       return res.statusCode == 200;
     } catch (_) { return false; }
+  }
+}
+
+extension ApiItem on Api {
+  Future<Map<String, dynamic>?> getItemMeta(String id) async {
+    try {
+      final res = await http
+          .get(Uri.parse("$base/library/$id"), headers: _headers)
+          .timeout(const Duration(seconds: 5));
+      if (res.statusCode == 200) return json.decode(res.body) as Map<String, dynamic>;
+    } catch (_) {}
+    return null;
+  }
+
+  Future<Uint8List?> fetchMedia(String id) async {
+    try {
+      final res = await http
+          .get(Uri.parse("$base/media/$id"), headers: _headers)
+          .timeout(const Duration(seconds: 8));
+      if (res.statusCode == 200) return res.bodyBytes;
+    } catch (_) {}
+    return null;
   }
 }
 
@@ -2832,6 +2855,215 @@ class _SelectionActionsSheet extends StatelessWidget {
   }
 }
 
+class PhotoDetailPage extends StatefulWidget {
+  final LibEntry entry;
+  const PhotoDetailPage({super.key, required this.entry});
+
+  @override
+  State<PhotoDetailPage> createState() => _PhotoDetailPageState();
+}
+
+class _PhotoDetailPageState extends State<PhotoDetailPage> {
+  Uint8List? _imageBytes;
+  Map<String, dynamic>? _meta;
+  bool _loading = true;
+  bool _inSlideshow = true;  // default; will sync from flags when meta loads
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final app = InheritedAppState.of(context);
+    final api = Api(app.serverBase!, app.authToken);
+    setState(() { _loading = true; _error = null; });
+    try {
+      final meta = await api.getItemMeta(widget.entry.id);
+      final img  = await api.fetchMedia(widget.entry.id);
+      if (!mounted) return;
+      setState(() {
+        _meta = meta;
+        _imageBytes = img;  // for videos this will be raw video bytes; we’ll just show thumb in that case
+        final flags = (meta?["flags"] as Map?) ?? const {};
+        // Convention: include=true means "in slideshow"; default true if unset.
+        final include = flags["include"];
+        _inSlideshow = (include is bool) ? include : true;
+      });
+    } catch (e) {
+      setState(() => _error = "Failed to load: $e");
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _setInSlideshow(bool v) async {
+    final app = InheritedAppState.of(context);
+    final ok = await Api(app.serverBase!, app.authToken)
+        .setFlags(widget.entry.id, include: v);
+    if (ok) {
+      setState(() => _inSlideshow = v);
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(v ? "Included in slideshow" : "Excluded from slideshow")));
+    } else {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text("Update failed")));
+    }
+  }
+
+  String _fmtDate(int? unix, String? iso) {
+    try {
+      if (iso != null && iso.isNotEmpty) return iso.replaceFirst('T', ' ');
+      if (unix != null) {
+        final dt = DateTime.fromMillisecondsSinceEpoch(unix * 1000, isUtc: false);
+        return dt.toLocal().toString().split('.').first;
+      }
+    } catch (_) {}
+    return "—";
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = InheritedAppState.of(context);
+
+    return Scaffold(
+      appBar: AppBar(
+        leading: IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.pop(context)),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.more_vert),
+            onPressed: () {}, // optional overflow
+          ),
+        ],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _error != null
+              ? Center(child: Text(_error!))
+              : ListView(
+                  padding: EdgeInsets.zero,
+                  children: [
+                    // Media
+                    if (_imageBytes != null && widget.entry.isImage)
+                      AspectRatio(
+                        aspectRatio: 4/3, // safe default; image will letterbox
+                        child: Image.memory(
+                          _imageBytes!,
+                          fit: BoxFit.contain,
+                          gaplessPlayback: true,
+                          filterQuality: FilterQuality.high,
+                        ),
+                      )
+                    else
+                      // Fallback (video): show a large thumb instead
+                      FutureBuilder<Uint8List?>(
+                        future: Api(app.serverBase!, app.authToken).fetchThumb(widget.entry.id, maxW: 1200),
+                        builder: (context, snap) {
+                          if (!snap.hasData) {
+                            return const SizedBox(
+                              height: 240,
+                              child: Center(child: CircularProgressIndicator()),
+                            );
+                          }
+                          return Image.memory(snap.data!, fit: BoxFit.contain);
+                        },
+                      ),
+
+                    const Divider(height: 16),
+
+                    // In Slideshow toggle + frame name
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: Gaps.md, vertical: Gaps.sm),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text("In Slideshow", style: TextStyle(fontWeight: FontWeight.w600)),
+                                const SizedBox(height: 4),
+                                Text(app.frameName, style: const TextStyle(color: Colors.black54)),
+                              ],
+                            ),
+                          ),
+                          Switch(
+                            value: _inSlideshow,
+                            onChanged: (v) => _setInSlideshow(v),
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    const Divider(height: 16),
+
+                    // Share / Position (stubs)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: Gaps.md),
+                      child: Row(
+                        children: const [
+                          Expanded(child: _IconAction(icon: Icons.ios_share, label: "Share")),
+                          Expanded(child: _IconAction(icon: Icons.crop_free, label: "Position")),
+                        ],
+                      ),
+                    ),
+
+                    const SizedBox(height: Gaps.md),
+
+                    // Simple metadata section
+                    if (_meta != null) ...[
+                      _MetaRow(
+                        icon: Icons.event,
+                        label: _fmtDate((_meta!["mtime"] as int?), _meta!["date_taken"] as String?),
+                        trailingEdit: false,
+                      ),
+                      if ((_meta!["gps"] is Map))
+                        _MetaRow(
+                          icon: Icons.place,
+                          label:
+                              "Lat ${(_meta!["gps"]["lat"] as num).toStringAsFixed(5)}, Lon ${(_meta!["gps"]["lon"] as num).toStringAsFixed(5)}",
+                        ),
+                      _MetaRow(icon: Icons.person, label: "Prateek"), // placeholder owner
+                      const SizedBox(height: 24),
+                    ],
+                  ],
+                ),
+    );
+  }
+}
+
+class _IconAction extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  const _IconAction({required this.icon, required this.label});
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Icon(icon, size: 24),
+        const SizedBox(height: 6),
+        Text(label),
+      ],
+    );
+  }
+}
+
+class _MetaRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool trailingEdit;
+  const _MetaRow({required this.icon, required this.label, this.trailingEdit = false});
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      dense: true,
+      leading: Icon(icon),
+      title: Text(label),
+      trailing: trailingEdit ? const Icon(Icons.edit, size: 18) : null,
+    );
+  }
+}
 
 /// ----------------------------------------------------------------------------
 /// Small UI helpers
