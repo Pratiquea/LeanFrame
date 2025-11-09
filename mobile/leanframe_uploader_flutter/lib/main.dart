@@ -16,6 +16,9 @@ import 'package:bonsoir/bonsoir.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:crypto/crypto.dart';
 import 'dart:math' show min;
+import 'package:share_plus/share_plus.dart';
+import 'package:http_parser/http_parser.dart'; // for MediaType
+import 'package:image/image.dart' as img; 
 
 void main() => runApp(const LeanFrameApp());
 final appStateSingleton = AppState();
@@ -1557,10 +1560,10 @@ class _PhotoGridState extends State<_PhotoGrid> {
         }
         break;
       case "Exclude from slideshow":
-        ok = await api.setFlags(e.id, excludeFromSlideshow: true);
+        ok = await api.setFlags(e.id, include: false);
         break;
       case "Include in slideshow":
-        ok = await api.setFlags(e.id, include: true, excludeFromSlideshow: false);
+        ok = await api.setFlags(e.id, include: true);
         break;
       default:
         return;
@@ -1753,6 +1756,16 @@ extension ApiItem on Api {
       if (res.statusCode == 200) return res.bodyBytes;
     } catch (_) {}
     return null;
+  }
+
+  Future<bool> replaceImage(String id, Uint8List jpegBytes) async {
+    final req = http.MultipartRequest('POST', Uri.parse("$base/library/$id/replace"));
+    req.headers.addAll(_headers);
+    req.files.add(http.MultipartFile.fromBytes(
+      'file', jpegBytes, filename: "edited.jpg", contentType: MediaType('image', 'jpeg'),
+    ));
+    final res = await req.send();
+    return res.statusCode == 200;
   }
 }
 
@@ -2676,10 +2689,10 @@ class _SelectionEditorState extends State<SelectionEditor> {
       bool res = true;
       switch (action) {
         case "include":
-          res = await api.setFlags(id, include: true, excludeFromSlideshow: false);
+          res = await api.setFlags(id, include: true);
           break;
         case "exclude":
-          res = await api.setFlags(id, excludeFromSlideshow: true);
+          res = await api.setFlags(id, include: false);
           break;
         case "remove":
           res = await api.deleteItem(id);
@@ -3002,33 +3015,252 @@ class _PhotoDetailPageState extends State<PhotoDetailPage> {
                     Padding(
                       padding: const EdgeInsets.symmetric(horizontal: Gaps.md),
                       child: Row(
-                        children: const [
-                          Expanded(child: _IconAction(icon: Icons.ios_share, label: "Share")),
-                          Expanded(child: _IconAction(icon: Icons.crop_free, label: "Position")),
+                        children: [
+                          Expanded(
+                            child: _IconButton(
+                              icon: Icons.ios_share,
+                              label: "Share",
+                              onTap: () async {
+                                final app = InheritedAppState.of(context);
+                                final api = Api(app.serverBase!, app.authToken);
+                                final bytes = await api.fetchMedia(widget.entry.id);
+                                if (bytes == null) {
+                                  ScaffoldMessenger.of(context)
+                                      .showSnackBar(const SnackBar(content: Text("Unable to load media")));
+                                  return;
+                                }
+                                final name = widget.entry.id.split('/').last;
+                                await Share.shareXFiles([
+                                  XFile.fromData(
+                                    bytes,
+                                    name: name,
+                                    mimeType: widget.entry.isImage ? "image/jpeg" : "application/octet-stream",
+                                  )
+                                ]);
+                              },
+                            ),
+                          ),
+                          Expanded(
+                            child: _IconButton(
+                              icon: Icons.crop_free,
+                              label: "Position",
+                              onTap: () async {
+                                final app = InheritedAppState.of(context);
+                                // You can use runtime if you later expose screen aspect there.
+                                final double aspect = MediaQuery.of(context).size.width /
+                                    MediaQuery.of(context).size.height;
+                                await Navigator.of(context).push(
+                                  MaterialPageRoute(
+                                    builder: (_) => PhotoEditPage(
+                                      entry: widget.entry,
+                                      targetAspect: aspect,
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
+                          ),
                         ],
                       ),
                     ),
+                    // Share / Position row (as above)...
 
                     const SizedBox(height: Gaps.md),
 
-                    // Simple metadata section
-                    if (_meta != null) ...[
-                      _MetaRow(
-                        icon: Icons.event,
-                        label: _fmtDate((_meta!["mtime"] as int?), _meta!["date_taken"] as String?),
-                        trailingEdit: false,
+                    // --- Below the buttons: Date, Location, User ---
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: Gaps.md),
+                      child: Column(
+                        children: [
+                          _MetaRow(icon: Icons.event, label: _fmtDate((_meta?["mtime"] as int?), _meta?["date_taken"] as String?)),
+                          _MetaRow(
+                            icon: Icons.place,
+                            label: (() {
+                              final g = _meta?["gps"] as Map?;
+                              if (g != null) {
+                                final lat = (g["lat"] as num).toStringAsFixed(5);
+                                final lon = (g["lon"] as num).toStringAsFixed(5);
+                                return "Lat $lat, Lon $lon";
+                              }
+                              return "Unknown location";
+                            })(),
+                          ),
+                          const _MetaRow(icon: Icons.person, label: "Prateek"), // or wire a real user name if you have it
+                        ],
                       ),
-                      if ((_meta!["gps"] is Map))
-                        _MetaRow(
-                          icon: Icons.place,
-                          label:
-                              "Lat ${(_meta!["gps"]["lat"] as num).toStringAsFixed(5)}, Lon ${(_meta!["gps"]["lon"] as num).toStringAsFixed(5)}",
-                        ),
-                      _MetaRow(icon: Icons.person, label: "Prateek"), // placeholder owner
-                      const SizedBox(height: 24),
-                    ],
+                    ),
+                    const SizedBox(height: 24),
                   ],
                 ),
+    );
+  }
+}
+
+class PhotoEditPage extends StatefulWidget {
+  final LibEntry entry;
+  final double targetAspect; // screen aspect (width/height)
+  const PhotoEditPage({super.key, required this.entry, required this.targetAspect});
+  @override
+  State<PhotoEditPage> createState() => _PhotoEditPageState();
+}
+
+class _PhotoEditPageState extends State<PhotoEditPage> {
+  Uint8List? _orig;
+  img.Image? _work;            // decoded
+  bool _dirty = false;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final app = InheritedAppState.of(context);
+    final api = Api(app.serverBase!, app.authToken);
+    final b = await api.fetchMedia(widget.entry.id);
+    if (!mounted) return;
+    if (b == null) { Navigator.pop(context); return; }
+    setState(() {
+      _orig = b;
+      _work = img.decodeImage(b);
+    });
+  }
+
+  Future<bool> _confirmDiscard() async {
+    if (!_dirty) return true;
+    final ans = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text("Unsaved changes"),
+        content: const Text("You have unsaved changes."),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Keep editing")),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text("Close anyway")),
+        ],
+      ),
+    );
+    return ans == true;
+  }
+
+  void _rotate90() {
+    if (_work == null) return;
+    setState(() {
+      _work = img.copyRotate(_work!, angle: 90);
+      _dirty = true;
+    });
+  }
+
+  void _cropToAspect() {
+    if (_work == null) return;
+    final w = _work!.width, h = _work!.height;
+    final want = widget.targetAspect; // W/H
+    final cur = w / h;
+    int x=0, y=0, cw=w, ch=h;
+    if (cur > want) { // too wide -> crop width
+      cw = (h * want).round();
+      x  = (w - cw) ~/ 2;
+    } else if (cur < want) { // too tall -> crop height
+      ch = (w / want).round();
+      y  = (h - ch) ~/ 2;
+    }
+    setState(() { _work = img.copyCrop(_work!, x: x, y: y, width: cw, height: ch); _dirty = true; });
+  }
+
+  Future<void> _save() async {
+    if (_work == null) return;
+    setState(() => _saving = true);
+    try {
+      final jpg = Uint8List.fromList(img.encodeJpg(_work!, quality: 92));
+      final app = InheritedAppState.of(context);
+      final ok = await Api(app.serverBase!, app.authToken).replaceImage(widget.entry.id, jpg);
+      if (!mounted) return;
+      if (ok) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Saved")));
+        Navigator.pop(context, true);
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Save failed")));
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return WillPopScope(
+      onWillPop: _confirmDiscard,
+      child: Scaffold(
+        appBar: AppBar(
+          leading: TextButton(
+            onPressed: () async {
+              if (await _confirmDiscard()) Navigator.pop(context, false);
+            },
+            child: const Text("Cancel"),
+          ),
+          actions: [
+            TextButton(
+              onPressed: _saving ? null : _save,
+              child: _saving
+                ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Text("Save"),
+            ),
+          ],
+        ),
+        body: _work == null
+            ? const Center(child: CircularProgressIndicator())
+            : Center(
+                child: AspectRatio(
+                  aspectRatio: _work!.width / _work!.height,
+                  child: Image.memory(Uint8List.fromList(img.encodePng(_work!)), fit: BoxFit.contain),
+                ),
+              ),
+        bottomNavigationBar: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(Gaps.md, 8, Gaps.md, 12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _cropToAspect,
+                    icon: const Icon(Icons.crop),
+                    label: const Text("Crop to Screen"),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _rotate90,
+                    icon: const Icon(Icons.rotate_right),
+                    label: const Text("Rotate 90°"),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _IconButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  const _IconButton({required this.icon, required this.label, required this.onTap});
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Column(
+        children: [
+          Icon(icon, size: 24),
+          const SizedBox(height: 6),
+          Text(label),
+        ],
+      ),
     );
   }
 }

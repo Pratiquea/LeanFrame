@@ -18,7 +18,8 @@ dependencies:
   bonsoir: any
   path_provider: ^2.1.3
   crypto: ^3.0.3
-
+  share_plus: ^10.0.0
+  image: ^4.2.0
 
 flutter:
   uses-material-design: true
