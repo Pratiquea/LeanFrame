@@ -527,3 +527,21 @@ async def set_flags(item_id: str = FPath(...), payload: Dict[str, Any] = None):
     _save_meta(meta)
     _bump_rev()
     return JSONResponse({"ok": True, "flags": rec})
+
+@app.post("/library/{item_id:path}/replace", dependencies=[Depends(auth)])
+async def replace_image(item_id: str = FPath(...), file: UploadFile = File(...)):
+    """Overwrite an existing image with edited bytes (JPEG/PNG)."""
+    p = _path_from_id(item_id)
+    if not _is_image(p):
+        raise HTTPException(415, "only images are replaceable")
+    data = await file.read()
+    try:
+        # normalize to JPEG to keep things simple
+        im = Image.open(BytesIO(data)).convert("RGB")
+        buf = BytesIO()
+        im.save(buf, format="JPEG", quality=92)
+        p.write_bytes(buf.getvalue())
+    except Exception as e:
+        raise HTTPException(400, f"invalid image data: {e}")
+    _bump_rev()
+    return JSONResponse({"ok": True})

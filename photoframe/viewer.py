@@ -1,3 +1,4 @@
+from logging import root
 import os, json, time, subprocess, random
 from pathlib import Path
 import pygame
@@ -8,6 +9,7 @@ from .config import AppCfg
 from .constants import SUPPORTED_IMAGES, SUPPORTED_VIDEOS
 from .fast_image_loader import FastImageLoader
 from .server import runtime_bus
+from urllib.parse import quote
 
 
 class Viewer:
@@ -33,11 +35,17 @@ class Viewer:
         # -------- Flags-aware playlist state --------
         self._meta_cache: dict[str, dict] = {}
         self._meta_mtime: float = 0.0
+        self._meta_path = Path(self.cfg.paths.library) / ".meta.json"
         self._playlist: list[tuple[int, str, str]] = []  # [(id, path, kind)]
         self._id_index: dict[int, int] = {}              # id -> index in _playlist
         self._rebuild_playlist()  # build initial playlist using flags
 
-        # ---- Flags-aware playlist + meta helpers ----
+    @staticmethod
+    def _id_from_library_path(root: Path, path: Path) -> str:
+        rel = os.path.relpath(path, root)
+        return quote(rel, safe="/-._~")
+    
+    # ---- Flags-aware playlist + meta helpers ----
     def _meta_path(self) -> Path:
         """Return path to .meta.json in the configured library."""
         return self.cfg.paths.library / ".meta.json"
@@ -63,12 +71,6 @@ class Viewer:
             pass
 
     def _eligible_filter(self, rows: list[tuple[int, str, str]]) -> list[tuple[int, str, str]]:
-        """
-        Slideshow semantics:
-          - If ANY item has include==True -> show ONLY those included items,
-            then remove any that also have exclude_from_slideshow==True.
-          - Else (no explicit includes) -> show ALL items EXCEPT those with exclude_from_slideshow==True.
-        """
         self._load_meta_if_changed()
 
         inc_set: set[str] = set()
@@ -78,36 +80,34 @@ class Viewer:
                 continue
             if flags.get("include") is True:
                 inc_set.add(item_id)
-            # accept either canonical or legacy key in existing files (paranoia)
             if flags.get("exclude_from_slideshow") is True or flags.get("exclude_from_shuffle") is True:
                 exc_set.add(item_id)
 
-        lib_root = str(self.cfg.paths.library.as_posix())
-        def rel_id(path: str) -> str:
-            p = Path(path).resolve().as_posix()
-            if p.startswith(lib_root + "/"):
-                return p[len(lib_root)+1:]
-            # fallback: just the filename (rare, but keeps things moving)
-            return Path(path).name
+        lib_root = Path(self.cfg.paths.library)
 
-        # If there are any includes -> whitelist then subtract exclusions
+        def id_for_path(p_str: str) -> str:
+            # exact same id scheme as the server
+            p = Path(p_str)
+            rel = os.path.relpath(p, lib_root)
+            return quote(rel, safe="/-._~")
+
+        # If any includes exist -> whitelist then subtract exclusions
         if inc_set:
             out = []
             for (mid, path, kind) in rows:
-                rid = rel_id(path)
-                if rid in inc_set and rid not in exc_set:
+                iid = id_for_path(path)
+                if iid in inc_set and iid not in exc_set:
                     out.append((mid, path, kind))
             return out
 
         # Otherwise -> global list minus exclusions
         out = []
         for (mid, path, kind) in rows:
-            rid = rel_id(path)
-            if rid in exc_set:
+            iid = id_for_path(path)
+            if iid in exc_set:
                 continue
             out.append((mid, path, kind))
         return out
-
 
     def _rebuild_playlist(self) -> None:
         """
@@ -213,6 +213,27 @@ class Viewer:
             pass
 
 
+    def _is_in_slideshow(self, path: Path) -> bool:
+        """
+        Honor both 'include' and 'exclude_from_slideshow'.
+        Default behavior:
+        - If include == False -> skip
+        - Else if exclude_from_slideshow == True -> skip
+        - Else -> show
+        """
+        try:
+            self._load_meta_if_changed()
+            item_id = self._id_from_library_path(Path(self.cfg.paths.library), path)
+            flags = self._meta_cache.get(item_id) or {}
+            if flags.get("include") is False:
+                return False
+            if flags.get("exclude_from_slideshow") is True or flags.get("exclude_from_shuffle") is True:
+                return False
+            return True
+        except Exception:
+            return True
+
+
     def _load_resume_id(self):
         try:
             if self.state_path.exists():
@@ -262,6 +283,12 @@ class Viewer:
                 continue
 
             mid, path, kind = row
+
+            # respect "In Slideshow" flag
+            if not self._is_in_slideshow(path):
+                # skip to next immediately (do not display)
+                self.current_id = self.lib.next_id(mid, loop=self.cfg.playback.loop)
+                continue
 
             print(f"[viewer] showing id={mid} kind={kind} path={path}")
             path = Path(path)
