@@ -13,6 +13,9 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:wifi_iot/wifi_iot.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:bonsoir/bonsoir.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:crypto/crypto.dart';
+import 'dart:math' show min;
 
 void main() => runApp(const LeanFrameApp());
 final appStateSingleton = AppState();
@@ -990,6 +993,8 @@ class _HomeScreenState extends State<HomeScreen> {
       if (app.serverBase != null && app.connected) {
         final items = await Api(app.serverBase!, app.authToken).listLibrary();
         if (mounted) InheritedAppState.of(context).setLibrary(items);
+        final rev = await Api(app.serverBase!, app.authToken).getLibraryRev();
+        await LibraryStore.I.save(items, rev: rev);
       }
       await Future.delayed(const Duration(milliseconds: 400));
     }
@@ -1009,8 +1014,16 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _refreshAndDiscover(tries: 2);
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // Initialize disk stores and seed UI from last known manifest (fast startup)
+      await LibraryStore.I.init();
+      await DiskThumbCache.I.init(); 
+      final seed = await LibraryStore.I.load();
+      if (mounted && seed.items.isNotEmpty) {
+        InheritedAppState.of(context).setLibrary(seed.items);
+      }
+    // now do normal discovery/refresh
+    _refreshAndDiscover(tries: 2);
     });
   }
 
@@ -1257,6 +1270,8 @@ class _HomeScreenState extends State<HomeScreen> {
       await Future.delayed(const Duration(milliseconds: 250));
       final fresh = await api.listLibrary();
       InheritedAppState.of(context).setLibrary(fresh); // triggers grid rebuild
+      final rev = await api.getLibraryRev();
+      await LibraryStore.I.save(fresh, rev: rev);
     } catch (_) {
       // ignore; fall back to periodic poll or manual refresh
     }
@@ -1333,6 +1348,9 @@ class _PhotosHeaderRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final state = InheritedAppState.of(context);
+    final tooltip = (!state.connected)
+        ? "Connect to your frame first"
+        : (state.library.isEmpty ? "No items to select" : null);
     return Padding(
       padding: const EdgeInsets.fromLTRB(Gaps.md, Gaps.xs, Gaps.md, Gaps.xs),
       // padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
@@ -1340,24 +1358,26 @@ class _PhotosHeaderRow extends StatelessWidget {
         children: [
           Text("Media ($count)", style: const TextStyle(fontWeight: FontWeight.w600)),
           const Spacer(),
-          Tooltip(
-            message: (!state.connected)
-                ? "Connect to your frame first"
-                : (state.library.isEmpty ? "No items to select" : ""),
-            child: OutlinedButton.icon(
+          Builder(builder: (_) {
+            final btn = OutlinedButton.icon(
               onPressed: (state.connected && state.library.isNotEmpty)
                   ? () {
                       Navigator.of(context).push(
                         MaterialPageRoute(
-                          builder: (_) => SelectionEditor(entries: List.of(state.library)),
+                          builder: (_) =>
+                              SelectionEditor(entries: List.of(state.library)),
                         ),
                       );
                     }
-                  : null, // disabled if not connected or no items
+                  : null,
               icon: const Icon(Icons.check_box),
               label: const Text("Select"),
-            )
-          )
+            );
+            // …and only wrap it in a Tooltip when we actually have a message.
+            return (tooltip != null)
+                ? Tooltip(message: tooltip!, child: btn)
+                : btn;
+          }),
         ],
       ),
     );
@@ -1394,6 +1414,8 @@ class _PhotoGridState extends State<_PhotoGrid> {
   final _loading = <String, bool>{}; // prevent duplicate fetches
   Timer? _pollTimer;
   int? _rev; // last seen
+  final Map<String, bool> _failed = {}; // id -> failed once
+  static const int _thumbW = 360;
 
   @override
   void initState() {
@@ -1437,7 +1459,8 @@ class _PhotoGridState extends State<_PhotoGrid> {
     // removed
     for (final id in old.keys) {
       if (!now.containsKey(id)) {
-        _thumbs.get(id); // optional: evict or keep; no-op here
+        _thumbs.evict(id);
+        await DiskThumbCache.I.remove(id, maxW: _thumbW);
       }
     }
 
@@ -1447,17 +1470,41 @@ class _PhotoGridState extends State<_PhotoGrid> {
 
   Future<Uint8List?> _ensureThumb(BuildContext ctx, LibEntry e) async {
     final app = InheritedAppState.maybeOf(ctx) ?? appStateSingleton;
+
+    // 1) memory
     final cached = _thumbs.get(e.id);
     if (cached != null) return cached;
+
+    // avoid duplicate fetches
     if (_loading[e.id] == true) return null;
     _loading[e.id] = true;
+
     try {
-      final b = await Api(app.serverBase!, app.authToken).fetchThumb(e.id, maxW: 360);
-      if (b != null) {
-        _thumbs.put(e.id, b);
-        if (mounted) setState(() {}); // refresh this tile later
+      // 2) disk
+      final disk = await DiskThumbCache.I.get(e.id, maxW: _thumbW);
+      if (disk != null) {
+        _thumbs.put(e.id, disk);
+        if (mounted) setState(() {});
+        return disk;
       }
-      return b;
+
+      // 3) network
+      if (app.serverBase == null) return null;
+      final b = await Api(app.serverBase!, app.authToken)
+          .fetchThumb(e.id, maxW: _thumbW);
+
+      if (b != null) {
+        _failed.remove(e.id);
+        _thumbs.put(e.id, b);
+        // persist to disk for next app launch
+        await DiskThumbCache.I.put(e.id, b, maxW: _thumbW);
+        if (mounted) setState(() {});
+        return b;
+      } else {
+        _failed[e.id] = true; // mark failed so UI can show a retry state
+        if (mounted) setState(() {});
+        return null;
+      }
     } finally {
       _loading[e.id] = false;
     }
@@ -1503,7 +1550,10 @@ class _PhotoGridState extends State<_PhotoGrid> {
         if (ok) {
           final list = [...app.library]..removeWhere((x) => x.id == e.id);
           app.setLibrary(list);
-          _thumbs.get(e.id); // keep or drop; optional to evict
+          _thumbs.evict(e.id);                         // memory evict
+          await DiskThumbCache.I.remove(e.id, maxW: _thumbW); // disk evict
+          final rev = await api.getLibraryRev();
+          await LibraryStore.I.save(list, rev: rev);
         }
         break;
       case "Exclude from slideshow":
@@ -1536,8 +1586,11 @@ class _PhotoGridState extends State<_PhotoGrid> {
       onRefresh: () async {
         await autoDiscoverAndConnect(context);
         if (app.serverBase != null) {
-          final list = await Api(app.serverBase!, app.authToken).listLibrary();
+          final api = Api(app.serverBase!, app.authToken);
+          final list = await api.listLibrary();
           if (mounted) InheritedAppState.of(context).setLibrary(list);
+          final rev = await api.getLibraryRev();
+          await LibraryStore.I.save(list, rev: rev);
         }
       },
       child: GridView.builder(
@@ -1565,10 +1618,43 @@ class _PhotoGridState extends State<_PhotoGrid> {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                if (bytes == null)
-                  Container(color: Colors.grey.shade300, child: const Center(child: CircularProgressIndicator(strokeWidth: 2)))
+                if (bytes != null)
+                  Image.memory(
+                    bytes,
+                    fit: BoxFit.cover,
+                    gaplessPlayback: true,
+                    filterQuality: FilterQuality.medium,
+                  )
+                else if (_loading[e.id] == true)
+                  Container(
+                    color: Colors.grey.shade300,
+                    child: const Center(
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  )
+                else if (_failed[e.id] == true)
+                  InkWell(
+                    onTap: () {
+                      _failed.remove(e.id);
+                      _ensureThumb(context, e); // retry on tap
+                      setState(() {});
+                    },
+                    child: Container(
+                      color: Colors.grey.shade200,
+                      child: const Center(
+                        child: Icon(Icons.refresh, size: 28, color: Colors.black45),
+                      ),
+                    ),
+                  )
                 else
-                  Image.memory(bytes, fit: BoxFit.cover, gaplessPlayback: true, filterQuality: FilterQuality.medium),
+                  // first time—kick off load and show light placeholder
+                  Builder(
+                    builder: (_) {
+                      _ensureThumb(context, e);
+                      return Container(color: Colors.grey.shade300);
+                    },
+                  ),
+
                 if (e.isVideo)
                   const Align(
                     alignment: Alignment.bottomRight,
@@ -1650,6 +1736,9 @@ extension ApiLibrary on Api {
 // A tiny in-memory LRU for thumbnails (by count, not bytes).
 class ThumbCache {
   final int cap;
+  bool contains(String k) => _map.containsKey(k);
+  void evict(String k) => _map.remove(k);
+
   final _map = LinkedHashMap<String, Uint8List>();
   ThumbCache({this.cap = 128});
   Uint8List? get(String k) {
@@ -1665,6 +1754,57 @@ class ThumbCache {
     }
   }
 }
+
+// ================= Persistent Disk Thumb Cache =================
+class DiskThumbCache {
+  static DiskThumbCache? _i;
+  static DiskThumbCache get I => _i ??= DiskThumbCache._();
+  DiskThumbCache._();
+
+  late Directory _dir;
+  Future<void> init() async {
+    _dir = Directory("${(await getTemporaryDirectory()).path}/thumbs");
+    if (!await _dir.exists()) await _dir.create(recursive: true);
+  }
+
+  String _key(String id, int maxW) {
+    final h = sha1.convert(utf8.encode("$id|w=$maxW")).toString();
+    return "$h.jpg"; // treat as jpg/png—whatever server returns; extension is opaque
+  }
+
+  Future<Uint8List?> get(String id, {required int maxW}) async {
+    try {
+      final f = File("${_dir.path}/${_key(id, maxW)}");
+      if (!await f.exists()) return null;
+      return await f.readAsBytes();
+    } catch (_) { return null; }
+  }
+
+  Future<void> put(String id, Uint8List bytes, {required int maxW}) async {
+    try {
+      final f = File("${_dir.path}/${_key(id, maxW)}");
+      await f.writeAsBytes(bytes, flush: false);
+    } catch (_) {/* ignore */}
+  }
+
+  Future<void> remove(String id, {required int maxW}) async {
+    try {
+      final f = File("${_dir.path}/${_key(id, maxW)}");
+      if (await f.exists()) await f.delete();
+    } catch (_) {/* ignore */}
+  }
+
+  // optional: clean files that don't belong to current library
+  Future<void> purgeNotIn(Set<String> libraryIds, {required int maxW}) async {
+    try {
+      final files = await _dir.list().toList();
+      for (final e in files.whereType<File>()) {
+        // cannot reverse-map safely; skip unless you also store an index
+      }
+    } catch (_) {/* ignore */}
+  }
+}
+
 
 class StorageBar extends StatelessWidget {
   final StorageStats stats;
@@ -1928,6 +2068,14 @@ class _FrameSettingsTabState extends State<FrameSettingsTab> {
   bool _loop = true;
   int _crossfadeMs = 300;
   bool _loadedOnce = false; 
+  // Controllers for numeric fields (avoid recreating in build)
+  late final TextEditingController _blurCtrl;
+  late final TextEditingController _slideCtrl;
+  late final TextEditingController _xfadeCtrl;
+
+  // Prevent feedback loops when we programmatically update text
+  bool _updatingText = false;
+
 
   static const _allStyles = <String>[
     "solid",
@@ -1966,13 +2114,26 @@ class _FrameSettingsTabState extends State<FrameSettingsTab> {
 
   @override
   void initState() {
-    super.initState(); 
+    super.initState();
+
+    // create controllers once
+    _blurCtrl  = TextEditingController();
+    _slideCtrl = TextEditingController();
+    _xfadeCtrl = TextEditingController();
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       autoDiscoverAndConnect(context);
-      //  _refreshAndDiscover(tries: 2);
+      // _refreshAndDiscover(tries: 2);
     });
   }
 
+  @override
+  void dispose() {
+    _blurCtrl.dispose();
+    _slideCtrl.dispose();
+    _xfadeCtrl.dispose();
+    super.dispose();
+  }
 
   @override
   void didChangeDependencies() {
@@ -2001,7 +2162,15 @@ class _FrameSettingsTabState extends State<FrameSettingsTab> {
         _shuffle = r.shuffle;
         _loop = r.loop;
         _crossfadeMs = r.crossfadeMs;
+
+        // seed controllers
+        _updatingText = true;
+        _blurCtrl.text  = _blur.toStringAsFixed(0);
+        _slideCtrl.text = _slideS.toStringAsFixed(0);
+        _xfadeCtrl.text = _crossfadeMs.toString();
+        _updatingText = false;
       });
+
     } catch (e) {
       setState(() => error = "Failed to load: $e");
     }
@@ -2171,17 +2340,38 @@ class _FrameSettingsTabState extends State<FrameSettingsTab> {
                   min: 0, max: 64, divisions: 64,
                   value: _blur,
                   label: _blur.toStringAsFixed(0),
-                  onChanged: (v) => setState(() => _blur = v),
+                  // onChanged: (v) => setState(() => _blur = v),
+                  onChanged: (v) {
+                    setState(() => _blur = v);
+                    if (!_updatingText) {
+                      _updatingText = true;
+                      _blurCtrl.text = _blur.toStringAsFixed(0);
+                      _updatingText = false;
+                    }
+                  },
                 ),
               ),
               SizedBox(
                 width: 70,
                 child: TextField(
-                  controller: TextEditingController(text: _blur.toStringAsFixed(0)),
+                  controller: _blurCtrl,
                   keyboardType: TextInputType.number,
                   onSubmitted: (s) {
-                    final v = double.tryParse(s) ?? _blur;
-                    setState(() => _blur = v.clamp(0, 64));
+                    if (_updatingText) return;
+                    final v = double.tryParse(s);
+                    if (v == null) {
+                      // restore current value if parse failed
+                      _updatingText = true;
+                      _blurCtrl.text = _blur.toStringAsFixed(0);
+                      _updatingText = false;
+                      return;
+                    }
+                    setState(() {
+                      _blur = v.clamp(0, 64);
+                      _updatingText = true;
+                      _blurCtrl.text = _blur.toStringAsFixed(0);
+                      _updatingText = false;
+                    });
                   },
                 ),
               ),
@@ -2201,17 +2391,36 @@ class _FrameSettingsTabState extends State<FrameSettingsTab> {
                   min: 1, max: 120, divisions: 119,
                   value: _slideS,
                   label: _slideS.toStringAsFixed(0),
-                  onChanged: (v) => setState(() => _slideS = v),
+                  onChanged: (v) {
+                    setState(() => _slideS = v);
+                    if (!_updatingText) {
+                      _updatingText = true;
+                      _slideCtrl.text = _slideS.toStringAsFixed(0);
+                      _updatingText = false;
+                    }
+                  },
                 ),
               ),
               SizedBox(
                 width: 70,
                 child: TextField(
-                  controller: TextEditingController(text: _slideS.toStringAsFixed(0)),
+                  controller: _slideCtrl,
                   keyboardType: TextInputType.number,
                   onSubmitted: (s) {
-                    final v = double.tryParse(s) ?? _slideS;
-                    setState(() => _slideS = v.clamp(1, 120));
+                    if (_updatingText) return;
+                    final v = double.tryParse(s);
+                    if (v == null) {
+                      _updatingText = true;
+                      _slideCtrl.text = _slideS.toStringAsFixed(0);
+                      _updatingText = false;
+                      return;
+                    }
+                    setState(() {
+                      _slideS = v.clamp(1, 120);
+                      _updatingText = true;
+                      _slideCtrl.text = _slideS.toStringAsFixed(0);
+                      _updatingText = false;
+                    });
                   },
                 ),
               ),
@@ -2241,17 +2450,36 @@ class _FrameSettingsTabState extends State<FrameSettingsTab> {
                 min: 0, max: 3000, divisions: 60,
                 value: _crossfadeMs.toDouble(),
                 label: _crossfadeMs.toString(),
-                onChanged: (v) => setState(() => _crossfadeMs = v.round()),
+                onChanged: (v) {
+                  setState(() => _crossfadeMs = v.round());
+                  if (!_updatingText) {
+                    _updatingText = true;
+                    _xfadeCtrl.text = _crossfadeMs.toString();
+                    _updatingText = false;
+                  }
+                },
               ),
             ),
             SizedBox(
               width: 90,
               child: TextField(
-                controller: TextEditingController(text: _crossfadeMs.toString()),
+                controller: _xfadeCtrl,
                 keyboardType: TextInputType.number,
                 onSubmitted: (s) {
-                  final v = int.tryParse(s) ?? _crossfadeMs;
-                  setState(() => _crossfadeMs = v.clamp(0, 10000));
+                  if (_updatingText) return;
+                  final v = int.tryParse(s);
+                  if (v == null) {
+                    _updatingText = true;
+                    _xfadeCtrl.text = _crossfadeMs.toString();
+                    _updatingText = false;
+                    return;
+                  }
+                  setState(() {
+                    _crossfadeMs = v.clamp(0, 10000);
+                    _updatingText = true;
+                    _xfadeCtrl.text = _crossfadeMs.toString();
+                    _updatingText = false;
+                  });
                 },
               ),
             ),
@@ -2274,9 +2502,14 @@ class _FrameSettingsTabState extends State<FrameSettingsTab> {
     final v = int.parse(h, radix: 16);
     return Color(0xFF000000 | v);
   }
+  // String _toHex(Color c) {
+  //   final argb = c.toARGB32();          // 0xAARRGGBB
+  //   final rgb  = argb & 0x00FFFFFF;     // strip alpha
+  //   return "#${rgb.toRadixString(16).padLeft(6, '0').toUpperCase()}";
+  // }
   String _toHex(Color c) {
-    final argb = c.toARGB32();          // 0xAARRGGBB
-    final rgb  = argb & 0x00FFFFFF;     // strip alpha
+    final int argb = c.value;          // 0xAARRGGBB
+    final int rgb  = argb & 0x00FFFFFF; // strip alpha
     return "#${rgb.toRadixString(16).padLeft(6, '0').toUpperCase()}";
   }
 }
@@ -2335,7 +2568,48 @@ extension ApiRev on Api {
 }
 
 /// ----------------------------------------------------------------------------
-/// Selection editor (for already-uploaded grid items; optional stub)
+/// Local library manifest store
+/// ----------------------------------------------------------------------------
+class LibraryStore {
+  static LibraryStore? _i;
+  static LibraryStore get I => _i ??= LibraryStore._();
+  LibraryStore._();
+
+  late Directory _dir;
+  File get _manifest => File("${_dir.path}/manifest.json");
+
+  Future<void> init() async {
+    _dir = await getApplicationSupportDirectory();
+    if (!await _dir.exists()) await _dir.create(recursive: true);
+  }
+
+  Future<({int? rev, List<LibEntry> items})> load() async {
+    try {
+      if (!await _manifest.exists()) return (rev: null, items: const <LibEntry>[]);
+      final j = json.decode(await _manifest.readAsString()) as Map<String, dynamic>;
+      final items = ((j['items'] as List?) ?? const [])
+          .map((e) => LibEntry.fromJson(e as Map<String, dynamic>))
+          .toList();
+      final rev = (j['rev'] as num?)?.toInt();
+      return (rev: rev, items: items);
+    } catch (_) {
+      return (rev: null, items: const <LibEntry>[]);
+    }
+  }
+
+  Future<void> save(List<LibEntry> items, {int? rev}) async {
+    try {
+      final out = {
+        'rev': rev,
+        'items': items.map((e) => {'id': e.id, 'kind': e.kind, 'bytes': e.bytes}).toList(),
+      };
+      await _manifest.writeAsString(json.encode(out));
+    } catch (_) {/* ignore */}
+  }
+}
+
+/// ----------------------------------------------------------------------------
+/// Selection editor (for already-uploaded grid items)
 /// ----------------------------------------------------------------------------
 class SelectionEditor extends StatefulWidget {
   final List<LibEntry> entries;
@@ -2389,6 +2663,7 @@ class _SelectionEditorState extends State<SelectionEditor> {
           if (res) {
             widget.entries.removeWhere((e) => e.id == id);
             _thumbs.remove(id);
+            await DiskThumbCache.I.remove(id, maxW: 360); 
           }
           break;
       }

@@ -16,6 +16,9 @@ dependencies:
   wifi_iot: ^0.3.19+2
   permission_handler: ^11.3.1
   bonsoir: any
+  path_provider: ^2.1.3
+  crypto: ^3.0.3
+
 
 flutter:
   uses-material-design: true
