@@ -35,7 +35,7 @@ class Viewer:
         # -------- Flags-aware playlist state --------
         self._meta_cache: dict[str, dict] = {}
         self._meta_mtime: float = 0.0
-        self._meta_path = Path(self.cfg.paths.library) / ".meta.json"
+        # self._meta_path = Path(self.cfg.paths.library) / ".meta.json"
         self._playlist: list[tuple[int, str, str]] = []  # [(id, path, kind)]
         self._id_index: dict[int, int] = {}              # id -> index in _playlist
         self._rebuild_playlist()  # build initial playlist using flags
@@ -66,7 +66,9 @@ class Viewer:
             if m != self._meta_mtime:
                 self._meta_cache = json.loads(p.read_text() or "{}")
                 self._meta_mtime = m
-        except Exception:
+
+        except Exception as e:
+            print("load meta exception is ",e)
             # Keep last good cache on any read/parse error
             pass
 
@@ -230,7 +232,8 @@ class Viewer:
             if flags.get("exclude_from_slideshow") is True or flags.get("exclude_from_shuffle") is True:
                 return False
             return True
-        except Exception:
+        except Exception as e:
+            print(e)
             return True
 
 
