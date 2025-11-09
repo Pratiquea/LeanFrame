@@ -1,6 +1,6 @@
 # photoframe/server.py
 from fastapi import FastAPI, UploadFile, File, Header, HTTPException, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse 
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import shutil
@@ -16,7 +16,8 @@ import json
 import os
 import mimetypes
 import math
-from PIL import Image, ImageDraw
+from datetime import datetime
+from PIL import Image, ImageDraw, ExifTags
 from urllib.parse import quote, unquote
 import hashlib
 
@@ -98,6 +99,42 @@ def _save_meta(d: dict) -> None:
     with _META_LOCK:
         p = _META_PATH()
         p.write_text(json.dumps(d, indent=2, sort_keys=True))
+
+_EXIF_TAGS = {v: k for k, v in ExifTags.TAGS.items()}
+def _image_meta_from_exif(p: Path) -> dict:
+    """Best-effort EXIF parse: date, gps lat/lon."""
+    out: dict = {}
+    try:
+        with Image.open(p) as im:
+            exif = im.getexif()
+            if exif:
+                # Date
+                dt_key = _EXIF_TAGS.get('DateTimeOriginal') or _EXIF_TAGS.get('DateTime')
+                if dt_key and exif.get(dt_key):
+                    raw = str(exif.get(dt_key))
+                    # "YYYY:MM:DD HH:MM:SS" → ISO-ish
+                    try:
+                        d = datetime.strptime(raw, "%Y:%m:%d %H:%M:%S")
+                        out["date_taken"] = d.isoformat()
+                    except Exception:
+                        out["date_taken"] = raw
+                # GPS
+                gps_key = _EXIF_TAGS.get('GPSInfo')
+                if gps_key and exif.get(gps_key):
+                    gps = exif.get(gps_key)
+                    def _to_deg(rat, ref):
+                        if not rat or len(rat) < 3: return None
+                        def num(v): return float(v[0]) / float(v[1]) if isinstance(v, tuple) else float(v)
+                        deg = num(rat[0]) + num(rat[1]) / 60.0 + num(rat[2]) / 3600.0
+                        if ref in ("S", "W"): deg *= -1.0
+                        return deg
+                    lat = _to_deg(gps.get(2), gps.get(1))
+                    lon = _to_deg(gps.get(4), gps.get(3))
+                    if lat is not None and lon is not None:
+                        out["gps"] = {"lat": lat, "lon": lon}
+    except Exception:
+        pass
+    return out
 
 def _file_size(p: Path) -> int:
     try:
@@ -391,6 +428,15 @@ def _thumb_for_video_placeholder(p: Path, max_w: int) -> bytes:
     img.save(buf, format="PNG")
     return buf.getvalue()
 
+@app.get("/media/{item_id:path}", dependencies=[Depends(auth)])
+async def get_media(item_id: str = FPath(...)):
+    """
+    Stream the original file (images/videos).
+    """
+    p = _path_from_id(item_id)
+    mime, _ = mimetypes.guess_type(str(p))
+    return FileResponse(str(p), media_type=mime or "application/octet-stream")
+
 @app.get("/thumb/{item_id:path}", dependencies=[Depends(auth)])
 async def get_thumb(item_id: str = FPath(..., description="library-relative id"), w: Optional[int] = None):
     max_w = int(w or 360)
@@ -408,6 +454,28 @@ async def get_thumb(item_id: str = FPath(..., description="library-relative id")
         raise
     except Exception as e:
         raise HTTPException(500, f"thumb error: {e}")
+
+@app.get("/library/{item_id:path}", dependencies=[Depends(auth)])
+async def get_item_meta(item_id: str = FPath(...)):
+    """
+    Return metadata + flags for one library item.
+    """
+    p = _path_from_id(item_id)
+    kind = "image" if _is_image(p) else "video" if _is_video(p) else "other"
+    meta_file = _load_meta()
+    flags = meta_file.get(item_id, {})
+    info = {
+        "id": item_id,
+        "kind": kind,
+        "bytes": _file_size(p),
+        "mtime": int(p.stat().st_mtime),
+        "flags": flags,
+        "name": p.name,
+        "relpath": p.relative_to(_lib_root()).as_posix(),
+    }
+    if _is_image(p):
+        info.update(_image_meta_from_exif(p))
+    return JSONResponse(info)
 
 @app.delete("/library/{item_id:path}", dependencies=[Depends(auth)])
 async def delete_item(item_id: str = FPath(...)):
