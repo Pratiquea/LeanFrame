@@ -19,6 +19,8 @@ import 'dart:math' show min;
 import 'package:share_plus/share_plus.dart';
 import 'package:http_parser/http_parser.dart'; // for MediaType
 import 'package:image/image.dart' as img; 
+import 'package:image_editor_plus/image_editor_plus.dart';
+import 'package:crop_your_image/crop_your_image.dart';
 
 void main() => runApp(const LeanFrameApp());
 final appStateSingleton = AppState();
@@ -32,6 +34,8 @@ class Gaps {
   static const md  = 16.0;
   static const lg  = 20.0;
   static const xl  = 24.0;
+  static const xxl = 32.0;
+  static const xxxl = 48.0;
 }
 
 /// ----------------------------------------------------------------------------
@@ -42,6 +46,8 @@ class AppState extends ChangeNotifier {
   String? serverBase; // e.g. http://192.168.1.50:8765
   String authToken = "change-me";
   bool connected = false;
+  double? _screenW;
+  double? _screenH;
 
   final List<MediaItem> media = [];
   final List<LibEntry> library = [];
@@ -52,6 +58,19 @@ class AppState extends ChangeNotifier {
   }
 
   int get imageCount => library.length;
+
+
+  void setScreenSize({required double w, required double h}) {
+    if (w <= 0 || h <= 0) return;
+    _screenW = w; _screenH = h;
+    notifyListeners();
+  }
+
+  double? get frameAspectFromServer {
+    final w = _screenW, h = _screenH;
+    if (w == null || h == null || w <= 0 || h <= 0) return null;
+    return w / h;
+  }
 
   void setServer({required String base, required String token}) {
     serverBase = base.trim();
@@ -210,6 +229,8 @@ class RuntimeConfig {
   bool shuffle;
   bool loop;
   int crossfadeMs;       // better name for transition_crossfade_ms
+  double? screenW;
+  double? screenH;
 
   RuntimeConfig({
     required this.mode,
@@ -220,6 +241,8 @@ class RuntimeConfig {
     required this.shuffle,
     required this.loop,
     required this.crossfadeMs,
+    this.screenW,
+    this.screenH,
   });
 
   factory RuntimeConfig.fromJson(Map<String,dynamic> j) => RuntimeConfig(
@@ -231,6 +254,9 @@ class RuntimeConfig {
     shuffle: j["playback"]["shuffle"] == true,
     loop: j["playback"]["loop"] == true,
     crossfadeMs: j["playback"]["crossfade_ms"],
+    // default to 1920x1080 if missing
+    screenW: j["screen"]["width"] != null ? (j["screen"]["width"]).toDouble() : 1920.0, //default 1920.0,
+    screenH: j["screen"]["height"] != null ? (j["screen"]["height"]).toDouble() : 1080.0,
   );
 
   Map<String,dynamic> toJson() => {
@@ -247,6 +273,10 @@ class RuntimeConfig {
       "shuffle": shuffle,
       "loop": loop,
       "crossfade_ms": crossfadeMs,
+    },
+    "screen": {
+      "width": screenW,
+      "height": screenH,
     }
   };
 }
@@ -1167,7 +1197,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            Icon(Icons.settings, size: 18),
+                            Icon(Icons.tune_outlined, size: 18),
                             SizedBox(width: 6),
                             Text("Frame Controls"),
                           ],
@@ -1236,6 +1266,9 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
     final api = Api(state.serverBase!, state.authToken);
+    // Snapshot current IDs so we can detect what's newly added
+    final beforeIds = InheritedAppState.of(context).library.map((e) => e.id).toSet();
+
 
     final result = await FilePicker.platform.pickFiles(
       allowMultiple: true,
@@ -1275,6 +1308,12 @@ class _HomeScreenState extends State<HomeScreen> {
       InheritedAppState.of(context).setLibrary(fresh); // triggers grid rebuild
       final rev = await api.getLibraryRev();
       await LibraryStore.I.save(fresh, rev: rev);
+      // mark newly added items as "included"
+      final addedIds = fresh.map((e) => e.id).where((id) => !beforeIds.contains(id)).toList();
+      for (final id in addedIds) {
+        // best-effort; ignore failures silently
+        await api.setFlags(id, include: true);
+      }
     } catch (_) {
       // ignore; fall back to periodic poll or manual refresh
     }
@@ -2206,6 +2245,11 @@ class _FrameSettingsTabState extends State<FrameSettingsTab> {
         _xfadeCtrl.text = _crossfadeMs.toString();
         _updatingText = false;
       });
+      if (r.screenW != null && r.screenH != null) {
+        InheritedAppState.of(context).setScreenSize(
+          w: r.screenW!, h: r.screenH!,
+        );
+      }
 
     } catch (e) {
       setState(() => error = "Failed to load: $e");
@@ -2657,19 +2701,49 @@ class SelectionEditor extends StatefulWidget {
 
 class _SelectionEditorState extends State<SelectionEditor> {
   final Set<String> selected = {};
-  final Map<String, Uint8List> _thumbs = {};
-  final Set<String> _loading = {};
+  final ThumbCache _thumbs = ThumbCache(cap: 160);
+  final Map<String, bool> _loading = {};
+  final Map<String, bool> _failed = {};
+  static const int _thumbW = 360;
 
-  Future<void> _loadThumb(String id) async {
-    if (_thumbs.containsKey(id) || _loading.contains(id)) return;
-    _loading.add(id);
+  Future<Uint8List?> _ensureThumb(BuildContext ctx, LibEntry e) async {
+    final app = InheritedAppState.maybeOf(ctx) ?? appStateSingleton;
+
+    // 1) memory
+    final cached = _thumbs.get(e.id);
+    if (cached != null) return cached;
+
+    // avoid duplicate fetches
+    if (_loading[e.id] == true) return null;
+    _loading[e.id] = true;
+
     try {
-      final app = InheritedAppState.maybeOf(context) ?? appStateSingleton;
-      if (app.serverBase == null) return;
-      final b = await Api(app.serverBase!, app.authToken).fetchThumb(id, maxW: 360);
-      if (b != null && mounted) setState(() => _thumbs[id] = b);
+      // 2) disk
+      final disk = await DiskThumbCache.I.get(e.id, maxW: _thumbW);
+      if (disk != null) {
+        _thumbs.put(e.id, disk);
+        if (mounted) setState(() {});
+        return disk;
+      }
+
+      // 3) network
+      if (app.serverBase == null) return null;
+      final b = await Api(app.serverBase!, app.authToken)
+          .fetchThumb(e.id, maxW: _thumbW);
+
+      if (b != null) {
+        _failed.remove(e.id);
+        _thumbs.put(e.id, b);
+        await DiskThumbCache.I.put(e.id, b, maxW: _thumbW);
+        if (mounted) setState(() {});
+        return b;
+      } else {
+        _failed[e.id] = true;
+        if (mounted) setState(() {});
+        return null;
+      }
     } finally {
-      _loading.remove(id);
+      _loading[e.id] = false;
     }
   }
 
@@ -2698,8 +2772,8 @@ class _SelectionEditorState extends State<SelectionEditor> {
           res = await api.deleteItem(id);
           if (res) {
             widget.entries.removeWhere((e) => e.id == id);
-            _thumbs.remove(id);
-            await DiskThumbCache.I.remove(id, maxW: 360); 
+            _thumbs.evict(id);                 // evict from memory LRU
+            await DiskThumbCache.I.remove(id, maxW: _thumbW); // evict from disk
           }
           break;
       }
@@ -2787,9 +2861,10 @@ class _SelectionEditorState extends State<SelectionEditor> {
         itemBuilder: (_, i) {
           final e = items[i];
           final isSel = selected.contains(e.id);
-          final b = _thumbs[e.id];
-
-          if (b == null) _loadThumb(e.id);
+          final bytes = _thumbs.get(e.id);
+          if (bytes == null) {
+            _ensureThumb(context, e); // kick off load
+          }
 
           return GestureDetector(
             onTap: () {
@@ -2800,20 +2875,43 @@ class _SelectionEditorState extends State<SelectionEditor> {
             child: Stack(
               fit: StackFit.expand,
               children: [
-                if (b == null)
+                if (bytes != null)
+                  Image.memory(
+                    bytes,
+                    fit: BoxFit.cover,
+                    gaplessPlayback: true,
+                    filterQuality: FilterQuality.medium,
+                  )
+                else if (_loading[e.id] == true)
                   Container(
                     color: Colors.grey.shade300,
                     child: const Center(
                       child: CircularProgressIndicator(strokeWidth: 2),
                     ),
                   )
+                else if (_failed[e.id] == true)
+                  InkWell(
+                    onTap: () {
+                      _failed.remove(e.id);
+                      _ensureThumb(context, e); // retry
+                      setState(() {});
+                    },
+                    child: Container(
+                      color: Colors.grey.shade200,
+                      child: const Center(
+                        child: Icon(Icons.refresh, size: 28, color: Colors.black45),
+                      ),
+                    ),
+                  )
                 else
-                  Image.memory(
-                    b,
-                    fit: BoxFit.cover,
-                    gaplessPlayback: true,
-                    filterQuality: FilterQuality.medium,
+                  // first time—kick off load and show light placeholder
+                  Builder(
+                    builder: (_) {
+                      _ensureThumb(context, e);
+                      return Container(color: Colors.grey.shade300);
+                    },
                   ),
+
                 if (e.isVideo)
                   const Align(
                     alignment: Alignment.bottomRight,
@@ -2822,6 +2920,7 @@ class _SelectionEditorState extends State<SelectionEditor> {
                       child: Icon(Icons.play_circle_fill, size: 20, color: Colors.white70),
                     ),
                   ),
+
                 if (isSel)
                   Container(
                     color: Colors.black26,
@@ -2984,18 +3083,50 @@ class _PhotoDetailPageState extends State<PhotoDetailPage> {
                         },
                       ),
 
-                    const Divider(height: 16),
+                    const SizedBox(height: Gaps.md),
+                    const Divider(height: Gaps.xs),
 
                     // In Slideshow toggle + frame name
                     Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: Gaps.md, vertical: Gaps.sm),
+                      padding: const EdgeInsets.fromLTRB(Gaps.md, 0, Gaps.md, Gaps.xs),
                       child: Row(
                         children: [
                           Expanded(
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
-                                const Text("In Slideshow", style: TextStyle(fontWeight: FontWeight.w600)),
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Text(
+                                      "In Slideshow",
+                                      style: TextStyle(fontWeight: FontWeight.w600),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    IconButton(
+                                      icon: const Icon(Icons.help_outline, size: 20, color: Colors.grey),
+                                      tooltip: "What does this mean?",
+                                      onPressed: () {
+                                        showDialog(
+                                          context: context,
+                                          builder: (_) => AlertDialog(
+                                            title: const Text("In Slideshow"),
+                                            content: const Text(
+                                              "Choose whether this photo appears in the frame’s slideshow. "
+                                              "All photos will remain stored locally on the frame even if they’re excluded from the slideshow.",
+                                            ),
+                                            actions: [
+                                              TextButton(
+                                                onPressed: () => Navigator.pop(context),
+                                                child: const Text("OK"),
+                                              ),
+                                            ],
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ],
+                                ),
                                 const SizedBox(height: 4),
                                 Text(app.frameName, style: const TextStyle(color: Colors.black54)),
                               ],
@@ -3009,11 +3140,12 @@ class _PhotoDetailPageState extends State<PhotoDetailPage> {
                       ),
                     ),
 
-                    const Divider(height: 16),
+
+                    const Divider(height: Gaps.sm),
 
                     // Share / Position (stubs)
                     Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: Gaps.md),
+                      padding: const EdgeInsets.fromLTRB(Gaps.md, Gaps.xxl, Gaps.md, Gaps.xxl),
                       child: Row(
                         children: [
                           Expanded(
@@ -3042,8 +3174,8 @@ class _PhotoDetailPageState extends State<PhotoDetailPage> {
                           ),
                           Expanded(
                             child: _IconButton(
-                              icon: Icons.crop_free,
-                              label: "Position",
+                              icon: Icons.crop_rotate_outlined,
+                              label: "Crop",
                               onTap: () async {
                                 final app = InheritedAppState.of(context);
                                 // You can use runtime if you later expose screen aspect there.
@@ -3053,7 +3185,6 @@ class _PhotoDetailPageState extends State<PhotoDetailPage> {
                                   MaterialPageRoute(
                                     builder: (_) => PhotoEditPage(
                                       entry: widget.entry,
-                                      targetAspect: aspect,
                                     ),
                                   ),
                                 );
@@ -3098,22 +3229,37 @@ class _PhotoDetailPageState extends State<PhotoDetailPage> {
 
 class PhotoEditPage extends StatefulWidget {
   final LibEntry entry;
-  final double targetAspect; // screen aspect (width/height)
-  const PhotoEditPage({super.key, required this.entry, required this.targetAspect});
+  const PhotoEditPage({super.key, required this.entry});
+
   @override
   State<PhotoEditPage> createState() => _PhotoEditPageState();
 }
 
 class _PhotoEditPageState extends State<PhotoEditPage> {
   Uint8List? _orig;
-  img.Image? _work;            // decoded
-  bool _dirty = false;
-  bool _saving = false;
+  final _ctrl = CropController();
+  double? _aspect; // width/height
+  Completer<Uint8List>? _cropCompleter;
 
   @override
   void initState() {
     super.initState();
-    _load();
+    _start();
+  }
+
+  Future<void> _start() async {
+    await _load();
+    if (!mounted) return;
+    final a = await _frameAspect(context);
+    if (!mounted) return;
+    setState(() => _aspect = a);
+  }
+
+  Future<double> _frameAspect(BuildContext context) async {
+    // Prefer server screen aspect if we have it; fallback to 16:9.
+    final st = InheritedAppState.maybeOf(context) ?? appStateSingleton;
+    final a = st.frameAspectFromServer;
+    return (a != null && a > 0) ? a : (16 / 9);
   }
 
   Future<void> _load() async {
@@ -3122,122 +3268,92 @@ class _PhotoEditPageState extends State<PhotoEditPage> {
     final b = await api.fetchMedia(widget.entry.id);
     if (!mounted) return;
     if (b == null) { Navigator.pop(context); return; }
-    setState(() {
-      _orig = b;
-      _work = img.decodeImage(b);
-    });
+    setState(() => _orig = b);
   }
 
-  Future<bool> _confirmDiscard() async {
-    if (!_dirty) return true;
-    final ans = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text("Unsaved changes"),
-        content: const Text("You have unsaved changes."),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text("Keep editing")),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text("Close anyway")),
-        ],
-      ),
-    );
-    return ans == true;
-  }
+  Future<void> _onDone() async {
+    if (_orig == null) return;
 
-  void _rotate90() {
-    if (_work == null) return;
-    setState(() {
-      _work = img.copyRotate(_work!, angle: 90);
-      _dirty = true;
-    });
-  }
+    // Prepare to wait for onCropped callback
+    _cropCompleter = Completer<Uint8List>();
+    _ctrl.crop(); // This triggers the onCropped callback on the widget
 
-  void _cropToAspect() {
-    if (_work == null) return;
-    final w = _work!.width, h = _work!.height;
-    final want = widget.targetAspect; // W/H
-    final cur = w / h;
-    int x=0, y=0, cw=w, ch=h;
-    if (cur > want) { // too wide -> crop width
-      cw = (h * want).round();
-      x  = (w - cw) ~/ 2;
-    } else if (cur < want) { // too tall -> crop height
-      ch = (w / want).round();
-      y  = (h - ch) ~/ 2;
-    }
-    setState(() { _work = img.copyCrop(_work!, x: x, y: y, width: cw, height: ch); _dirty = true; });
-  }
+    final cropped = await _cropCompleter!.future; // <- await bytes here
+    if (!mounted) return;
 
-  Future<void> _save() async {
-    if (_work == null) return;
-    setState(() => _saving = true);
+    // Ensure JPEG before sending
+    Uint8List jpeg;
     try {
-      final jpg = Uint8List.fromList(img.encodeJpg(_work!, quality: 92));
-      final app = InheritedAppState.of(context);
-      final ok = await Api(app.serverBase!, app.authToken).replaceImage(widget.entry.id, jpg);
-      if (!mounted) return;
-      if (ok) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Saved")));
-        Navigator.pop(context, true);
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Save failed")));
-      }
-    } finally {
-      if (mounted) setState(() => _saving = false);
+      final im = img.decodeImage(cropped);
+      jpeg = Uint8List.fromList(img.encodeJpg(im!, quality: 92));
+    } catch (_) {
+      jpeg = cropped;
     }
+
+    final app = InheritedAppState.of(context);
+    final ok = await Api(app.serverBase!, app.authToken)
+        .replaceImage(widget.entry.id, jpeg);
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(ok ? "Saved" : "Save failed")),
+    );
+    Navigator.pop(context, ok);
   }
 
   @override
   Widget build(BuildContext context) {
-    return WillPopScope(
-      onWillPop: _confirmDiscard,
-      child: Scaffold(
-        appBar: AppBar(
-          leading: TextButton(
-            onPressed: () async {
-              if (await _confirmDiscard()) Navigator.pop(context, false);
-            },
-            child: const Text("Cancel"),
-          ),
-          actions: [
-            TextButton(
-              onPressed: _saving ? null : _save,
-              child: _saving
-                ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                : const Text("Save"),
-            ),
-          ],
+    // Loading states kept super simple
+    if (_orig == null || _aspect == null) {
+      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+    }
+
+    return Scaffold(
+      appBar: AppBar(
+        leadingWidth: 92,
+        leading: TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text("Cancel", softWrap: false, maxLines: 1),
         ),
-        body: _work == null
-            ? const Center(child: CircularProgressIndicator())
-            : Center(
-                child: AspectRatio(
-                  aspectRatio: _work!.width / _work!.height,
-                  child: Image.memory(Uint8List.fromList(img.encodePng(_work!)), fit: BoxFit.contain),
-                ),
+        title: const Text("Crop"),
+        actions: [
+          TextButton(
+            onPressed: _onDone,
+            child: const Text("Done"),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: Center(
+          child: Crop(
+            controller: _ctrl,
+            image: _orig!,                 // original bytes
+            aspectRatio: _aspect!,         // lock to frame aspect
+            withCircleUi: false,
+            baseColor: Colors.black,
+            maskColor: Colors.black54,
+            onCropped: (Uint8List bytes) {
+              // complete any pending waiters
+              _cropCompleter?.complete(bytes);
+              _cropCompleter = null;
+            },
+          ),
+        ),
+      ),
+      bottomNavigationBar: SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(Gaps.md, Gaps.xs, Gaps.md, Gaps.md),
+          child: Row(
+            children: [
+              TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancel")),
+              const Spacer(),
+              FilledButton.icon(
+                onPressed: _onDone,
+                icon: const Icon(Icons.check),
+                label: const Text("Apply"),
               ),
-        bottomNavigationBar: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(Gaps.md, 8, Gaps.md, 12),
-            child: Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _cropToAspect,
-                    icon: const Icon(Icons.crop),
-                    label: const Text("Crop to Screen"),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: OutlinedButton.icon(
-                    onPressed: _rotate90,
-                    icon: const Icon(Icons.rotate_right),
-                    label: const Text("Rotate 90°"),
-                  ),
-                ),
-              ],
-            ),
+            ],
           ),
         ),
       ),
@@ -3254,12 +3370,16 @@ class _IconButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return InkWell(
       onTap: onTap,
-      child: Column(
-        children: [
-          Icon(icon, size: 24),
-          const SizedBox(height: 6),
-          Text(label),
-        ],
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 22),
+              const SizedBox(height: 2),
+              Text(label),// style: TextStyle(fontSize: 12, height: 1.1)),
+            ],
+        ),
       ),
     );
   }
@@ -3274,7 +3394,7 @@ class _IconAction extends StatelessWidget {
     return Column(
       children: [
         Icon(icon, size: 24),
-        const SizedBox(height: 6),
+        const SizedBox(height: 4),
         Text(label),
       ],
     );
