@@ -1,5 +1,5 @@
 # photoframe/server.py
-from fastapi import FastAPI, UploadFile, File, Header, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, Header, HTTPException, Depends, Query
 from fastapi.responses import JSONResponse, FileResponse 
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
@@ -20,12 +20,78 @@ from datetime import datetime
 from PIL import Image, ImageDraw, ExifTags
 from urllib.parse import quote, unquote
 import hashlib
+from pydantic import BaseModel, Field
 
+try:
+    import pyvips                     
+    _HAS_VIPS = True
+except Exception:
+    from PIL import ImageOps          
+    _HAS_VIPS = False
 _IMG_EXT = { "jpg","jpeg","png","webp","bmp","heic","heif","dng","tif","tiff","avif" }
 _VID_EXT = { "mp4","mov","m4v","avi","mkv","webm","hevc","heif","heifv" }  # extend as you like
 
 _LIB_REV = 1
 _REV_LOCK = threading.RLock()
+
+class CropSpec(BaseModel):
+    # normalized [0..1] in *post-EXIF* upright coordinates
+    x: float = Field(0, ge=0, le=1)
+    y: float = Field(0, ge=0, le=1)
+    w: float = Field(1, ge=0, le=1)
+    h: float = Field(1, ge=0, le=1)
+    rotate_deg: int = 0              # multiples of 90 only
+    hflip: bool = False
+    vflip: bool = False
+
+# --- Crops cache + store ---
+def _cache_dir() -> Path:
+    d = _lib_root() / ".cache" / "derivatives"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+class _CropStore:
+    """Thread-safe JSON dict id -> CropSpec."""
+    def __init__(self, root: Path):
+        self._path = root / ".crops.json"
+        self._lock = threading.RLock()
+        self._data: dict[str, dict] = {}
+        if self._path.exists():
+            try:
+                self._data = json.loads(self._path.read_text())
+            except Exception:
+                self._data = {}
+
+    def _save(self):
+        tmp = self._path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._data, separators=(",", ":")))
+        tmp.replace(self._path)
+
+    def get(self, id_: str) -> CropSpec | None:
+        with self._lock:
+            rec = self._data.get(id_)
+        return CropSpec(**rec) if rec else None
+
+    def put(self, id_: str, spec: CropSpec):
+        with self._lock:
+            self._data[id_] = spec.model_dump()
+            self._save()
+
+    def delete(self, id_: str):
+        with self._lock:
+            if id_ in self._data:
+                del self._data[id_]
+                self._save()
+
+# instantiate lazily after cfg is injected; see _ensure_crops()
+_crops: _CropStore | None = None
+
+def _ensure_crops() -> _CropStore:
+    global _crops
+    if _crops is None:
+        _crops = _CropStore(_lib_root())
+    return _crops
+
 
 def _bump_rev():
     global _LIB_REV
@@ -443,8 +509,9 @@ async def get_thumb(item_id: str = FPath(..., description="library-relative id")
     p = _path_from_id(item_id)
     try:
         if _is_image(p):
-            data = _thumb_for_image(p, max_w)
-            return Response(content=data, media_type="image/jpeg")
+            spec = _ensure_crops().get(item_id) or CropSpec()
+            outp = _render_variant(item_id, p, spec, max_w=max_w, max_h=max_w)
+            return FileResponse(str(outp), media_type="image/jpeg")
         elif _is_video(p):
             data = _thumb_for_video_placeholder(p, max_w)
             return Response(content=data, media_type="image/png")
@@ -454,6 +521,7 @@ async def get_thumb(item_id: str = FPath(..., description="library-relative id")
         raise
     except Exception as e:
         raise HTTPException(500, f"thumb error: {e}")
+
 
 @app.get("/library/{item_id:path}", dependencies=[Depends(auth)])
 async def get_item_meta(item_id: str = FPath(...)):
@@ -545,3 +613,119 @@ async def replace_image(item_id: str = FPath(...), file: UploadFile = File(...))
         raise HTTPException(400, f"invalid image data: {e}")
     _bump_rev()
     return JSONResponse({"ok": True})
+
+# Get current crop (or implicit full-frame)
+@app.get("/library/{id}/crop", dependencies=[Depends(auth)])
+def get_crop(id: str):
+    spec = _ensure_crops().get(id) or CropSpec()
+    return spec.model_dump()
+
+# Set/update crop (normalized rect)
+@app.put("/library/{id}/crop", dependencies=[Depends(auth)])
+def set_crop(id: str, spec: CropSpec):
+    _ensure_crops().put(id, spec)
+    _purge_variants_for(id)
+    # bump rev so clients can refetch list if needed
+    _bump_rev()
+    return {"ok": True}
+
+# Optional: clear crop (back to full)
+@app.delete("/library/{id}/crop", dependencies=[Depends(auth)])
+def del_crop(id: str):
+    _ensure_crops().delete(id)
+    _purge_variants_for(id)
+    _bump_rev()
+    return {"ok": True}
+
+
+@app.get("/render/{item_id:path}", dependencies=[Depends(auth)])
+async def render_media(item_id: str = FPath(...),
+                       w: int | None = Query(None, gt=0),
+                       h: int | None = Query(None, gt=0)):
+    """
+    Cropped + resized image view (non-destructive). Use w/h to request a size.
+    For original bytes, call /media/{item_id}.
+    """
+    p = _path_from_id(item_id)
+    if _is_video(p):
+        raise HTTPException(415, "render only supports images")
+    if not _is_image(p):
+        raise HTTPException(415, "unsupported media")
+
+    spec = _ensure_crops().get(item_id) or CropSpec()
+    outp = _render_variant(item_id, p, spec, max_w=w, max_h=h)
+    return FileResponse(str(outp), media_type="image/jpeg")
+
+# ---- On-the-fly crop + resize with caching ----
+def _safe_key(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()
+
+def _variant_key(item_id: str, spec: CropSpec, max_w: int | None, max_h: int | None, mtime: float) -> str:
+    h = hashlib.sha1()
+    h.update(item_id.encode())
+    h.update(str(mtime).encode())
+    h.update(f"{spec.x:.6f},{spec.y:.6f},{spec.w:.6f},{spec.h:.6f},".encode())
+    h.update(f"{spec.rotate_deg},{int(spec.hflip)},{int(spec.vflip)},".encode())
+    h.update(f"w={max_w or 0},h={max_h or 0}".encode())
+    return h.hexdigest()
+
+def _apply_crop_vips(img, spec: CropSpec):
+    img = img.autorot() if hasattr(img, "autorot") else img
+    W, H = img.width, img.height
+    x = int(spec.x * W); y = int(spec.y * H)
+    cw = max(1, int(spec.w * W)); ch = max(1, int(spec.h * H))
+    x = max(0, min(W - 1, x)); y = max(0, min(H - 1, y))
+    cw = max(1, min(W - x, cw)); ch = max(1, min(H - y, ch))
+    out = img.crop(x, y, cw, ch)
+    if spec.hflip: out = out.fliphor()
+    if spec.vflip: out = out.flipver()
+    if spec.rotate_deg % 360:
+        out = out.rot((spec.rotate_deg // 90) % 4)  # 0/1/2/3 quarter turns
+    return out
+
+def _apply_crop_pillow(im: Image.Image, spec: CropSpec) -> Image.Image:
+    im = ImageOps.exif_transpose(im)
+    W, H = im.size
+    x = int(spec.x * W); y = int(spec.y * H)
+    cw = max(1, int(spec.w * W)); ch = max(1, int(spec.h * H))
+    box = (x, y, min(W, x+cw), min(H, y+ch))
+    im = im.crop(box)
+    if spec.hflip: im = ImageOps.mirror(im)
+    if spec.vflip: im = ImageOps.flip(im)
+    if spec.rotate_deg % 360:
+        im = im.rotate(spec.rotate_deg, expand=True, resample=Image.Resampling.BICUBIC)
+    return im
+
+def _render_variant(item_id: str, orig_path: Path, spec: CropSpec,
+                    max_w: int | None, max_h: int | None) -> Path:
+    cdir = _cache_dir()
+    mtime = orig_path.stat().st_mtime
+    key = _variant_key(item_id, spec, max_w, max_h, mtime)
+    outp = cdir / f"{_safe_key(item_id)}__{key}.jpg"
+    if outp.exists():
+        return outp
+
+    if _HAS_VIPS:
+        img = pyvips.Image.new_from_file(str(orig_path), access="sequential")
+        img = _apply_crop_vips(img, spec)
+        if max_w or max_h:
+            sx = (max_w / img.width) if max_w else 1.0
+            sy = (max_h / img.height) if max_h else 1.0
+            scale = min(sx, sy)
+            if scale < 1.0:
+                img = img.resize(scale)
+        img.jpegsave(str(outp), Q=90, strip=True, optimize_coding=True)
+    else:
+        im = Image.open(orig_path).convert("RGB")
+        im = _apply_crop_pillow(im, spec)
+        if max_w or max_h:
+            im.thumbnail((max_w or 1_000_000, max_h or 1_000_000), Image.Resampling.LANCZOS)
+        im.save(outp, "JPEG", quality=90, optimize=True)
+    return outp
+
+def _purge_variants_for(item_id: str):
+    cdir = _cache_dir()
+    prefix = _safe_key(item_id) + "__"
+    for f in cdir.glob(prefix + "*.jpg"):
+        try: f.unlink()
+        except: pass
