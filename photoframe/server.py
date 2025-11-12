@@ -83,6 +83,53 @@ class _CropStore:
                 del self._data[id_]
                 self._save()
 
+def _edited_dir() -> Path:
+    d = _lib_root() / ".cache" / "edits"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+class _EditStore:
+    """id -> edited-filename (within .cache/edits)."""
+    def __init__(self, root: Path):
+        self._path = root / ".edits.json"
+        self._lock = threading.RLock()
+        self._data: dict[str, str] = {}
+        if self._path.exists():
+            try:
+                self._data = json.loads(self._path.read_text())
+            except Exception:
+                self._data = {}
+    def _save(self):
+        tmp = self._path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._data, separators=(",", ":")))
+        tmp.replace(self._path)
+    def get(self, id_: str) -> str | None:
+        with self._lock:
+            return self._data.get(id_)
+    def put(self, id_: str, filename: str):
+        with self._lock:
+            self._data[id_] = filename
+            self._save()
+    def delete(self, id_: str):
+        with self._lock:
+            if id_ in self._data:
+                del self._data[id_]
+                self._save()
+
+_edits: _EditStore | None = None
+def _ensure_edits() -> _EditStore:
+    global _edits
+    if _edits is None:
+        _edits = _EditStore(_lib_root())
+    return _edits
+
+def _edited_master_path(item_id: str) -> Path | None:
+    name = _ensure_edits().get(item_id)
+    if not name:
+        return None
+    p = _edited_dir() / name
+    return p if p.exists() else None
+
 # instantiate lazily after cfg is injected; see _ensure_crops()
 _crops: _CropStore | None = None
 
@@ -599,12 +646,12 @@ async def set_flags(item_id: str = FPath(...), payload: Dict[str, Any] = None):
 @app.post("/library/{item_id:path}/replace", dependencies=[Depends(auth)])
 async def replace_image(item_id: str = FPath(...), file: UploadFile = File(...)):
     """
-    Overwrite the original image with edited bytes.
-    IMPORTANT: clear any stored CropSpec for this id and purge cached variants
-               so future renders/thumbnails show the new original.
+    Save edited bytes as a non-destructive 'edited master' sidecar.
+    Do NOT modify the on-disk original.
+    Also clear any stored CropSpec and purge cached variants.
     """
-    p = _path_from_id(item_id)
-    if not _is_image(p):
+    orig = _path_from_id(item_id)
+    if not _is_image(orig):
         raise HTTPException(415, "only images are replaceable")
 
     data = await file.read()
@@ -612,17 +659,21 @@ async def replace_image(item_id: str = FPath(...), file: UploadFile = File(...))
         im = Image.open(BytesIO(data)).convert("RGB")
         buf = BytesIO()
         im.save(buf, format="JPEG", quality=92)
-        p.write_bytes(buf.getvalue())
+        # save into .cache/edits under a stable name tied to id + orig mtime
+        key = hashlib.sha1(f"{item_id}|{orig.stat().st_mtime}".encode()).hexdigest()
+        outp = _edited_dir() / f"{key}.jpg"
+        outp.write_bytes(buf.getvalue())
+        _ensure_edits().put(item_id, outp.name)
     except Exception as e:
         raise HTTPException(400, f"invalid image data: {e}")
 
-    # ---- NEW: clear old crop + cached variants ----
+    # Reset any legacy crop and kill all pre-rendered variants.
     try:
-        _ensure_crops().delete(item_id)   # forget stored normalized crop
+        _ensure_crops().delete(item_id)
     except Exception:
         pass
     try:
-        _purge_variants_for(item_id)      # kill /render and /thumb cached jpgs
+        _purge_variants_for(item_id)
     except Exception:
         pass
 
@@ -714,6 +765,7 @@ def _apply_crop_pillow(im: Image.Image, spec: CropSpec) -> Image.Image:
 def _render_variant(item_id: str, orig_path: Path, spec: CropSpec,
                     max_w: int | None, max_h: int | None) -> Path:
     cdir = _cache_dir()
+    base = _edited_master_path(item_id) or orig_path
     mtime = orig_path.stat().st_mtime
     key = _variant_key(item_id, spec, max_w, max_h, mtime)
     outp = cdir / f"{_safe_key(item_id)}__{key}.jpg"
@@ -721,7 +773,8 @@ def _render_variant(item_id: str, orig_path: Path, spec: CropSpec,
         return outp
 
     if _HAS_VIPS:
-        img = pyvips.Image.new_from_file(str(orig_path), access="sequential")
+        img = pyvips.Image.new_from_file(str(base), access="sequential")
+
         img = _apply_crop_vips(img, spec)
         if max_w or max_h:
             sx = (max_w / img.width) if max_w else 1.0
@@ -731,7 +784,7 @@ def _render_variant(item_id: str, orig_path: Path, spec: CropSpec,
                 img = img.resize(scale)
         img.jpegsave(str(outp), Q=90, strip=True, optimize_coding=True)
     else:
-        im = Image.open(orig_path).convert("RGB")
+        im = Image.open(base).convert("RGB")
         im = _apply_crop_pillow(im, spec)
         if max_w or max_h:
             im.thumbnail((max_w or 1_000_000, max_h or 1_000_000), Image.Resampling.LANCZOS)
