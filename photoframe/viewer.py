@@ -10,6 +10,8 @@ from .constants import SUPPORTED_IMAGES, SUPPORTED_VIDEOS
 from .fast_image_loader import FastImageLoader
 from .server import runtime_bus
 from urllib.parse import quote
+import requests
+from io import BytesIO
 
 
 class Viewer:
@@ -321,22 +323,79 @@ class Viewer:
 
     def _show_image(self, path: str):
         """
-        Render using FastImageLoader:
-          - Decodes directly to screen size (low CPU/RAM)
-          - Applies EXIF orientation
-          - Uses libjpeg-turbo DCT scaling for JPEGs if available
-          - Centers image (letterboxed if aspect differs)
+        If a non-default crop is stored, fetch a sized render from the server.
+        Otherwise, keep the fast local load.
         """
-        frame = self.loader.load_surface(path)
-        # center the image; it may be smaller than screen if aspect ratio differs
-        dst_rect = frame.get_rect(center=(self.W//2, self.H//2))
+        W, H = self.W, self.H
+        lib_root = Path(self.cfg.paths.library)
+        item_id = self._id_from_library_path(lib_root, Path(path))
+
+        spec = self._fetch_crop_spec(item_id)  # {} or full/partial crop
+
+        def _is_default_crop(s: dict) -> bool:
+            # same defaults as CropSpec
+            return (
+                not s or
+                (float(s.get("x", 0)) == 0 and float(s.get("y", 0)) == 0 and
+                float(s.get("w", 1)) == 1 and float(s.get("h", 1)) == 1 and
+                int(s.get("rotate_deg", 0)) % 360 == 0 and
+                not bool(s.get("hflip", False)) and
+                not bool(s.get("vflip", False)))
+            )
+
+        if _is_default_crop(spec):
+            # No crop → use local fast path (turbojpeg pipeline)
+            frame = self.loader.load_surface(path)
+        else:
+            # Have a crop → ask server to render cropped + sized
+            frame = self._load_surface_via_render(item_id, W, H)
+            if frame is None:
+                # fallback to local if server render fails
+                frame = self.loader.load_surface(path)
+
+        dst_rect = frame.get_rect(center=(W // 2, H // 2))
         if self.crossfade_ms > 0:
             self._crossfade(frame, dst_rect)
         else:
-            self.screen.fill((0,0,0))
+            self.screen.fill((0, 0, 0))
             self.screen.blit(frame, dst_rect.topleft)
             pygame.display.flip()
             self._sleep_with_events(self.cfg.playback.slide_duration_s)
+
+
+    def _server_base(self) -> str:
+        # You likely already have host/port in cfg.server; if not, 127.0.0.1:8765 is your default from logs.
+        # Adjust if your FastAPI binds elsewhere.
+        host = getattr(self.cfg.server, "host", "127.0.0.1")
+        port = int(getattr(self.cfg.server, "port", 8765))
+        return f"http://{host}:{port}"
+
+    def _fetch_crop_spec(self, item_id: str) -> dict:
+        """
+        GET /library/{id}/crop — returns {'x','y','w','h','rotate_deg','hflip','vflip'}
+        """
+        url = f"{self._server_base()}/library/{item_id}/crop"
+        headers = {"x-auth-token": self.cfg.server.auth_token}
+        try:
+            r = requests.get(url, headers=headers, timeout=2.0)
+            r.raise_for_status()
+            return r.json() or {}
+        except Exception:
+            return {}
+
+    def _load_surface_via_render(self, item_id: str, w: int, h: int) -> "pygame.Surface | None":
+        """
+        GET /render/{id}?w=...&h=... and turn bytes into a pygame Surface.
+        """
+        url = f"{self._server_base()}/render/{item_id}?w={w}&h={h}"
+        headers = {"x-auth-token": self.cfg.server.auth_token}
+        try:
+            r = requests.get(url, headers=headers, timeout=5.0)
+            r.raise_for_status()
+            return pygame.image.load(BytesIO(r.content))
+        except Exception as e:
+            print("[viewer] render fetch failed:", e)
+            return None
 
     def _crossfade(self, new_surface: pygame.Surface, dst_rect: pygame.Rect):
         start = pygame.time.get_ticks()
